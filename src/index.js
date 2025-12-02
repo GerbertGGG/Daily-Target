@@ -264,7 +264,7 @@ export default {
       let badRecovery = false;
       let veryBadRecovery = false;
 
-      if (sleepScore != null && sleepScore >= 80) goodRecovery = true;
+      if (sleepScore != null && sleepScore >= 75) goodRecovery = true;
       if (sleepScore != null && sleepScore <= 60) badRecovery = true;
       if (sleepScore != null && sleepScore <= 50) veryBadRecovery = true;
 
@@ -272,9 +272,9 @@ export default {
       if (sleepHours != null && sleepHours <= 6) badRecovery = true;
       if (sleepHours != null && sleepHours <= 5.5) veryBadRecovery = true;
 
-      if (hrv != null && hrv >= 42) goodRecovery = true;
-      if (hrv != null && hrv <= 35) badRecovery = true;
-      if (hrv != null && hrv <= 30) veryBadRecovery = true;
+      if (hrv != null && hrv >= 45) goodRecovery = true;
+      if (hrv != null && hrv <= 40) badRecovery = true;
+      if (hrv != null && hrv <= 37) veryBadRecovery = true;
 
       if (weekState === "Müde" || veryBadRecovery) {
         if (veryBadRecovery) {
