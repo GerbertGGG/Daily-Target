@@ -1,4 +1,4 @@
-const fetch = require("node-fetch");
+
 
 const BASE_URL = "https://intervals.icu/api/v1";
 
