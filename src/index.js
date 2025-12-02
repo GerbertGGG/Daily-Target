@@ -28,7 +28,7 @@ function classifyWeek(ctl, atl, rampRate) {
   if (rampRate <= -0.5 && tsb >= -5) {
     state = "Erholt";
   }
-  // Müde: RampRate > 0 oder sehr negative Form oder ATL deutlich über CTL
+  // Müde: RampRate > 0 oder sehr negative TSB oder ATL deutlich über CTL
   else if (rampRate >= 1.0 || tsb <= -10 || atl > ctl + 5) {
     state = "Müde";
   }
@@ -43,14 +43,24 @@ function stateEmoji(state) {
   return "⚖️"; // Normal
 }
 
-// Zukunftswochen simulieren und geplante Wochenziele in Wellness schreiben
+/**
+ * Zukunftswochen simulieren:
+ * - Startet bei CTL/ATL am Montag dieser Woche
+ * - Woche 0 = aktuelle Woche (weeklyTarget0, weekState0)
+ * - Für jede weitere Woche:
+ *    - CTL/ATL der Vorwoche simulieren (mit weeklyTargetPrev)
+ *    - Zustand klassifizieren
+ *    - falls nicht Müde -> +5% Wochenziel
+ *    - falls Müde       -> -20% Wochenziel
+ *    - geplantes Wochenziel + WochenPlan in Wellness schreiben
+ */
 async function simulatePlannedWeeks(
   ctlMon0,
   atlMon0,
   weekState0,
   weeklyTarget0,
-  baseMondayDate,
-  weeksToSim,
+  baseMondayDate,      // Date-Objekt, Montag dieser Woche (Start)
+  weeksToSim,          // z.B. 4 -> aktuelle Woche + 3 Zukunft
   authHeader,
   athleteId,
   planField,
@@ -59,65 +69,17 @@ async function simulatePlannedWeeks(
   const tauCtl = 42;
   const tauAtl = 7;
 
-  // Startwerte: Montag dieser Woche
+  // Startwerte am Montag dieser Woche
   let ctlStart = ctlMon0;
   let atlStart = atlMon0;
-  let prevCtl = ctlMon0;
 
-  for (let w = 0; w < weeksToSim; w++) {
-    let weekState;
-    let weeklyTarget;
+  let prevTarget = weeklyTarget0;
+  let prevState = weekState0;
 
-    if (w === 0) {
-      // aktuelle Woche: Zustand & Target sind schon bekannt
-      weekState = weekState0;
-      weeklyTarget = weeklyTarget0;
-    } else {
-      // zukünftige Wochen: Zustand & WeeklyTarget aus Simulation ableiten
-      const rampRateSim = ctlStart - prevCtl; // CTL-Änderung letzte Woche
-      const { state } = classifyWeek(ctlStart, atlStart, rampRateSim);
-      weekState = state;
-
-      const dailyMonTargetSim = computeDailyTarget(ctlStart, atlStart);
-      let factor = 7; // Normal
-      if (weekState === "Erholt") factor = 8;
-      if (weekState === "Müde") factor = 5.5;
-
-      weeklyTarget = Math.round(dailyMonTargetSim * factor);
-    }
-
-    // Datum des jeweiligen Montags
-    const mondayFutureDate = new Date(baseMondayDate);
-    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7 * w);
-    const mondayId = mondayFutureDate.toISOString().slice(0, 10);
-
-    // Für zukünftige Wochen (w >= 1) geplante Werte nach Intervals schreiben
-    if (w >= 1) {
-      const emoji = stateEmoji(weekState);
-      const planText = `Rest ${weeklyTarget} | ${emoji} ${weekState} (geplant)`;
-
-      const payloadFuture = {
-        id: mondayId,
-        [weeklyTargetField]: weeklyTarget,
-        [planField]: planText
-      };
-
-      await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payloadFuture)
-        }
-      );
-    }
-
-    // CTL/ATL für nächste Woche simulieren (7 Tage mit gleichmäßigem Load)
-    prevCtl = ctlStart;
-    const dailyLoad = weeklyTarget / 7;
+  // Wir simulieren ab Woche 1 (Woche 0 = aktuelle Woche)
+  for (let w = 1; w < weeksToSim; w++) {
+    // 1) CTL/ATL der Vorwoche simulieren, wenn man prevTarget trifft
+    const dailyLoad = prevTarget / 7;
     let ctl = ctlStart;
     let atl = atlStart;
 
@@ -126,8 +88,57 @@ async function simulatePlannedWeeks(
       atl = atl + (dailyLoad - atl) / tauAtl;
     }
 
-    ctlStart = ctl;
-    atlStart = atl;
+    const ctlEnd = ctl;
+    const atlEnd = atl;
+    const rampRateSim = ctlEnd - ctlStart;
+
+    // 2) Zustand aus Simulation bestimmen
+    const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampRateSim);
+
+    // 3) Neues Wochenziel: je nach Zustand hoch oder runter
+    let nextState = simState;
+    let nextTarget;
+
+    if (simState === "Müde") {
+      // Müde -> Erholungswoche: -20 %
+      nextTarget = Math.max(0, Math.round(prevTarget * 0.8));
+    } else {
+      // Nicht müde (Erholt oder Normal) -> +5 % Progression
+      nextTarget = Math.max(0, Math.round(prevTarget * 1.05));
+    }
+
+    // 4) Datum des zukünftigen Montags
+    const mondayFutureDate = new Date(baseMondayDate);
+    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7 * w);
+    const mondayId = mondayFutureDate.toISOString().slice(0, 10);
+
+    // 5) In Wellness als „geplant“ eintragen
+    const emoji = stateEmoji(nextState);
+    const planText = `Rest ${nextTarget} | ${emoji} ${nextState} (geplant)`;
+
+    const payloadFuture = {
+      id: mondayId,
+      [weeklyTargetField]: nextTarget,
+      [planField]: planText
+    };
+
+    await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader
+        },
+        body: JSON.stringify(payloadFuture)
+      }
+    );
+
+    // 6) Werte für nächste Schleife vorbereiten
+    ctlStart = ctlEnd;
+    atlStart = atlEnd;
+    prevTarget = nextTarget;
+    prevState = nextState;
   }
 }
 
@@ -245,8 +256,8 @@ export default {
       // --- 7) Wellness für HEUTE updaten (Ist-Woche) ---
       const payloadToday = {
         id: today,
-        [dailyField]: dailyTarget,       // TageszielTSS
-        [planField]: planTextToday,      // WochenPlan (Rest + Emoji + Zustand)
+        [dailyField]: dailyTarget,        // TageszielTSS
+        [planField]: planTextToday,       // WochenPlan (Rest + Emoji + Zustand)
         [weeklyTargetField]: weeklyTarget // WochenzielTSS (volles Wochenziel)
       };
 
@@ -270,8 +281,8 @@ export default {
         );
       }
 
-      // --- 8) Zukunfts-Wochen simulieren (nächste 3 Montage) ---
-      const WEEKS_TO_SIMULATE = 4; // 0 = aktuelle Woche + 3 zukünftige
+      // --- 8) Zukunfts-Wochen simulieren (aktuelle + 3 weitere Montage) ---
+      const WEEKS_TO_SIMULATE = 4; // 0 = aktuelle Woche, 1-3 = Zukunft
       await simulatePlannedWeeks(
         ctlMon,
         atlMon,
