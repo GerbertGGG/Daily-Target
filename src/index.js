@@ -21,7 +21,7 @@ export default {
 
     const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
 
-    // Heutiges Datum (UTC) – aktuell so gelassen
+    // Heutiges Datum (UTC)
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     const todayDate = new Date(today + "T00:00:00Z");
@@ -92,18 +92,27 @@ export default {
         dailyMonTarget = dailyTarget;
       }
 
-      // --- 4) Woche klassifizieren (Build / Maintain / Deload) ---
-      let weekMode = "Maintain";
+      // --- 4) Woche klassifizieren → Erholt / Normal / Müde ---
+      // Logik bleibt wie vorher:
+      // früher: Build      → jetzt: Erholt
+      // früher: Maintain   → jetzt: Normal
+      // früher: Deload     → jetzt: Müde
 
+      let weekState = "Normal"; // Default
+
+      // Erholt (vorher "Build"): RampRate leicht negativ & nicht zu müde
       if (rampRate <= -0.5 && tsb >= -5) {
-        weekMode = "Build";
-      } else if (rampRate >= 1.0 || tsb <= -10 || atl > ctl + 5) {
-        weekMode = "Deload";
+        weekState = "Erholt";
+      }
+      // Müde (vorher "Deload"): zu hohe RampRate oder sehr negative TSB oder ATL deutlich über CTL
+      else if (rampRate >= 1.0 || tsb <= -10 || atl > ctl + 5) {
+        weekState = "Müde";
       }
 
-      let factor = 7;
-      if (weekMode === "Build") factor = 8;      // etwas mehr
-      if (weekMode === "Deload") factor = 5.5;   // bewusst weniger
+      // Wochenfaktor je nach Zustand
+      let factor = 7; // Normal
+      if (weekState === "Erholt") factor = 8;    // etwas mehr Umfang
+      if (weekState === "Müde") factor = 5.5;    // bewusst weniger
 
       const weeklyTarget = Math.round(dailyMonTarget * factor);
 
@@ -128,18 +137,18 @@ export default {
       );
 
       // --- 6) Emoji & WochenPlan-Text ---
-      let modeEmoji = "⚖️";
-      if (weekMode === "Build") modeEmoji = "🔥";
-      if (weekMode === "Deload") modeEmoji = "🧘";
+      let modeEmoji = "⚖️"; // Normal
+      if (weekState === "Erholt") modeEmoji = "🔥";
+      if (weekState === "Müde") modeEmoji = "🧘";
 
-      const planText = `Rest ${weeklyRemaining} | ${modeEmoji} ${weekMode}`;
+      const planText = `Rest ${weeklyRemaining} | ${modeEmoji} ${weekState}`;
 
       // --- 7) Wellness für HEUTE updaten ---
       const payload = {
         id: today,
-        [dailyField]: dailyTarget,              // TageszielTSS
-        [planField]: planText,                  // WochenPlan (Text mit Rest + Emoji)
-        [weeklyTargetField]: weeklyTarget       // WochenzielTSS (volles Wochenziel)
+        [dailyField]: dailyTarget,        // TageszielTSS
+        [planField]: planText,            // WochenPlan (Rest + Emoji + Zustand)
+        [weeklyTargetField]: weeklyTarget // WochenzielTSS (volles Wochenziel)
       };
 
       const updateRes = await fetch(
