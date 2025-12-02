@@ -303,7 +303,7 @@ weeklyTarget = Math.round(Math.max(0, weeklyTarget));
       }
 
       // --- 8) Zukunfts-Wochen simulieren (aktuelle + 3 weitere Montage) ---
-      const WEEKS_TO_SIMULATE = 4; // 0 = aktuelle Woche, 1-3 = Zukunft
+      const WEEKS_TO_SIMULATE = 9; // 0 = aktuelle Woche, 1-3 = Zukunft
       await simulatePlannedWeeks(
         ctlMon,
         atlMon,
