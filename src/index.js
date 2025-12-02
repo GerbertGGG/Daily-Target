@@ -60,8 +60,8 @@ async function simulatePlannedWeeks(
   atlMon0,
   weekState0,
   weeklyTarget0,
-  baseMondayDate,      // Date-Objekt, Montag dieser Woche (Start)
-  weeksToSim,          // z.B. 4 -> aktuelle Woche + 3 Zukunft
+  baseMondayDate,
+  weeksToSim,
   authHeader,
   athleteId,
   planField,
@@ -75,11 +75,13 @@ async function simulatePlannedWeeks(
   let atlStart = atlMon0;
 
   let prevTarget = weeklyTarget0;
+  let prevState = weekState0;
 
-  // Wir simulieren ab Woche 1 (Woche 0 = aktuelle Woche)
+  // Woche 0 = aktuelle Woche, deshalb starten wir bei 1
   for (let w = 1; w < weeksToSim; w++) {
-    // 1) CTL/ATL der Vorwoche simulieren, wenn man prevTarget trifft
     const dailyLoad = prevTarget / 7;
+
+    // --- Simulation CTL/ATL über 7 Tage ---
     let ctl = ctlStart;
     let atl = atlStart;
 
@@ -90,37 +92,77 @@ async function simulatePlannedWeeks(
 
     const ctlEnd = ctl;
     const atlEnd = atl;
-    const rampRateSim = ctlEnd - ctlStart;
+    const rampSim = ctlEnd - ctlStart;
 
-    // 2) Zustand aus Simulation bestimmen
-    const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampRateSim);
+    // --- Wochenzustand der simulierten Woche ---
+    const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampSim);
 
-    // 3) Neues Wochenziel: je nach Zustand hoch oder runter
-    let nextState = simState;
-    let nextTarget;
+    // --- RampRate-Regler (Variante B) ---
+    let nextTarget = prevTarget;
 
     if (simState === "Müde") {
-      // Müde -> Erholungswoche: -20 %
-      nextTarget = Math.max(0, Math.round(prevTarget * 0.8));
+      // Erholungswoche
+      nextTarget = Math.round(prevTarget * 0.8);
     } else {
-      // Nicht müde (Erholt oder Normal) -> +5 % Progression
-      nextTarget = Math.max(0, Math.round(prevTarget * 1.05));
+      if (rampSim < 0.5) {
+        nextTarget = Math.round(prevTarget * 1.15); // +15%
+      }
+      else if (rampSim < 0.8) {
+        nextTarget = Math.round(prevTarget * 1.10); // +10%
+      }
+      else if (rampSim <= 1.3) {
+        nextTarget = Math.round(prevTarget * 1.05); // +5%
+      }
+      else if (rampSim <= 1.6) {
+        nextTarget = Math.round(prevTarget * 0.92); // -8%
+      }
+      else {
+        nextTarget = Math.round(prevTarget * 0.85); // -15%
+      }
     }
 
-    // 4) Datum des zukünftigen Montags
+    // --- Sicherstellen, dass keine zu großen Sprünge passieren ---
+    // Härtere Caps
+    const maxIncrease = prevTarget * 1.20;
+    const minDecrease = prevTarget * 0.75;
+
+    nextTarget = Math.max(minDecrease, Math.min(nextTarget, maxIncrease));
+
+    // --- Datum des zukünftigen Montags berechnen ---
     const mondayFutureDate = new Date(baseMondayDate);
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7 * w);
     const mondayId = mondayFutureDate.toISOString().slice(0, 10);
 
-    // 5) In Wellness als „geplant“ eintragen
-    const emoji = stateEmoji(nextState);
-    const planText = `Rest ${nextTarget} | ${emoji} ${nextState} (geplant)`;
+    // --- WochenPlan für geplante Wochen ---
+    const emoji = stateEmoji(simState);
+    const planText = `Rest ${nextTarget} | ${emoji} ${simState} (geplant)`;
 
     const payloadFuture = {
       id: mondayId,
       [weeklyTargetField]: nextTarget,
       [planField]: planText
     };
+
+    // --- Schreiben in Wellness ---
+    await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader
+        },
+        body: JSON.stringify(payloadFuture)
+      }
+    );
+
+    // --- Vorbereitung für nächste Woche ---
+    ctlStart = ctlEnd;
+    atlStart = atlEnd;
+    prevTarget = nextTarget;
+    prevState = simState;
+  }
+}
 
     await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
