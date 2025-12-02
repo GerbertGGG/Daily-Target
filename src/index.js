@@ -1,10 +1,11 @@
 const BASE_URL = "https://intervals.icu/api/v1";
 
-// 🔥 Hardcoded Variablen – bitte auf DEINE Werte anpassen!
-const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
-const INTERVALS_ATHLETE_ID = "i105857"; //-- z.B. i104975
-const INTERVALS_TARGET_FIELD = "TageszielTSS";
-const INTERVALS_PLAN_FIELD = "WochenPlan";
+// 🔥 Hardcoded Variablen – HIER deine Werte eintragen!
+const INTERVALS_API_KEY = "DEIN_INTERVALS_API_KEY_HIER";     // z.B. 1xg1v0...
+const INTERVALS_ATHLETE_ID = "DEINE_ATHLETE_ID_HIER";        // z.B. i104975
+const INTERVALS_TARGET_FIELD = "TageszielTSS";               // numerisches Feld in Wellness
+const INTERVALS_PLAN_FIELD = "WochenPlan";                   // Textfeld in Wellness
+const WEEKLY_TARGET_FIELD = "WochenzielTSS";                 // numerisches Feld für Wochenziel
 
 export default {
   async fetch(request) {
@@ -12,6 +13,7 @@ export default {
     const athleteId = INTERVALS_ATHLETE_ID;
     const dailyField = INTERVALS_TARGET_FIELD;
     const planField = INTERVALS_PLAN_FIELD;
+    const weeklyTargetField = WEEKLY_TARGET_FIELD;
 
     if (!apiKey || !athleteId) {
       return new Response("Missing hardcoded config", { status: 500 });
@@ -19,20 +21,20 @@ export default {
 
     const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
 
-    // Heutiges Datum (UTC)
+    // Heutiges Datum (UTC) – aktuell so gelassen
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     const todayDate = new Date(today + "T00:00:00Z");
 
-    // Montag dieser Woche
-    const weekday = todayDate.getUTCDay(); // 0=So
+    // Montag dieser Woche bestimmen
+    const weekday = todayDate.getUTCDay(); // 0=So,1=Mo,...
     const offset = weekday === 0 ? 6 : weekday - 1;
     const mondayDate = new Date(todayDate);
     mondayDate.setUTCDate(mondayDate.getUTCDate() - offset);
     const mondayStr = mondayDate.toISOString().slice(0, 10);
 
     try {
-      // --- 1) Wellness heute holen ---
+      // --- 1) Wellness HEUTE holen ---
       const wellnessRes = await fetch(
         `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
         { headers: { Authorization: authHeader } }
@@ -55,7 +57,7 @@ export default {
         return new Response("No ctl/atl data", { status: 200 });
       }
 
-      // --- 2) Tagesziel (Option B) ---
+      // --- 2) Tagesziel (Option B: base=1.0, k=0.05) ---
       const base = 1.0;
       const k = 0.05;
       const tsb = ctl - atl;
@@ -65,7 +67,7 @@ export default {
       dailyTss = Math.max(0, Math.min(dailyTss, ctl * 1.5));
       const dailyTarget = Math.round(dailyTss);
 
-      // --- 3) Montag-Wellness ---
+      // --- 3) Montag-Wellness für Wochenbasis ---
       const mondayWellnessRes = await fetch(
         `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
         { headers: { Authorization: authHeader } }
@@ -86,11 +88,13 @@ export default {
 
         dailyMonTarget = Math.round(dailyMon);
       } else {
+        // Fallback: wenn Montagseintrag fehlt, nimm heutiges Tagesziel
         dailyMonTarget = dailyTarget;
       }
 
-      // --- 4) Woche klassifizieren ---
+      // --- 4) Woche klassifizieren (Build / Maintain / Deload) ---
       let weekMode = "Maintain";
+
       if (rampRate <= -0.5 && tsb >= -5) {
         weekMode = "Build";
       } else if (rampRate >= 1.0 || tsb <= -10 || atl > ctl + 5) {
@@ -98,12 +102,12 @@ export default {
       }
 
       let factor = 7;
-      if (weekMode === "Build") factor = 8;
-      if (weekMode === "Deload") factor = 5.5;
+      if (weekMode === "Build") factor = 8;      // etwas mehr
+      if (weekMode === "Deload") factor = 5.5;   // bewusst weniger
 
       const weeklyTarget = Math.round(dailyMonTarget * factor);
 
-      // --- 5) Wochenload ---
+      // --- 5) Wöchentliche Load (ctlLoad) seit Montag summieren ---
       let weekLoad = 0;
 
       const weekRes = await fetch(
@@ -123,18 +127,19 @@ export default {
         Math.round(weeklyTarget - weekLoad)
       );
 
-      // --- 6) Emoji ---
+      // --- 6) Emoji & WochenPlan-Text ---
       let modeEmoji = "⚖️";
       if (weekMode === "Build") modeEmoji = "🔥";
       if (weekMode === "Deload") modeEmoji = "🧘";
 
       const planText = `Rest ${weeklyRemaining} | ${modeEmoji} ${weekMode}`;
 
-      // --- 7) Wellness PUT ---
+      // --- 7) Wellness für HEUTE updaten ---
       const payload = {
         id: today,
-        [dailyField]: dailyTarget,
-        [planField]: planText
+        [dailyField]: dailyTarget,              // TageszielTSS
+        [planField]: planText,                  // WochenPlan (Text mit Rest + Emoji)
+        [weeklyTargetField]: weeklyTarget       // WochenzielTSS (volles Wochenziel)
       };
 
       const updateRes = await fetch(
@@ -158,7 +163,7 @@ export default {
       }
 
       return new Response(
-        `OK: Tagesziel=${dailyTarget}, WochenPlan="${planText}"`,
+        `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}, WochenPlan="${planText}"`,
         { status: 200 }
       );
 
