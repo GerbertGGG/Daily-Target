@@ -1,14 +1,20 @@
 const BASE_URL = "https://intervals.icu/api/v1";
 
+// 🔥 Hardcoded Variablen – bitte auf DEINE Werte anpassen!
+const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
+const INTERVALS_ATHLETE_ID = "i105857"; //-- z.B. i104975
+const INTERVALS_TARGET_FIELD = "TageszielTSS";
+const INTERVALS_PLAN_FIELD = "WochenPlan";
+
 export default {
-  async fetch(request, env, ctx) {
-    const apiKey = env.INTERVALS_API_KEY;
-    const athleteId = env.INTERVALS_ATHLETE_ID;
-    const dailyField = env.INTERVALS_TARGET_FIELD || "TageszielTSS";
-    const planField = env.INTERVALS_PLAN_FIELD || "WochenPlan";
+  async fetch(request) {
+    const apiKey = INTERVALS_API_KEY;
+    const athleteId = INTERVALS_ATHLETE_ID;
+    const dailyField = INTERVALS_TARGET_FIELD;
+    const planField = INTERVALS_PLAN_FIELD;
 
     if (!apiKey || !athleteId) {
-      return new Response("Missing config", { status: 500 });
+      return new Response("Missing hardcoded config", { status: 500 });
     }
 
     const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
@@ -59,7 +65,7 @@ export default {
       dailyTss = Math.max(0, Math.min(dailyTss, ctl * 1.5));
       const dailyTarget = Math.round(dailyTss);
 
-      // --- 3) Montag-Wellness für Wochen-Target ---
+      // --- 3) Montag-Wellness ---
       const mondayWellnessRes = await fetch(
         `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
         { headers: { Authorization: authHeader } }
@@ -83,7 +89,7 @@ export default {
         dailyMonTarget = dailyTarget;
       }
 
-      // --- 4) Woche klassifizieren (Build / Maintain / Deload) ---
+      // --- 4) Woche klassifizieren ---
       let weekMode = "Maintain";
       if (rampRate <= -0.5 && tsb >= -5) {
         weekMode = "Build";
@@ -97,7 +103,7 @@ export default {
 
       const weeklyTarget = Math.round(dailyMonTarget * factor);
 
-      // --- 5) Wöchentliche Load (ctlLoad) summieren ---
+      // --- 5) Wochenload ---
       let weekLoad = 0;
 
       const weekRes = await fetch(
@@ -117,14 +123,14 @@ export default {
         Math.round(weeklyTarget - weekLoad)
       );
 
-      // --- 6) Emoji wählen & WochenPlan bauen ---
+      // --- 6) Emoji ---
       let modeEmoji = "⚖️";
       if (weekMode === "Build") modeEmoji = "🔥";
       if (weekMode === "Deload") modeEmoji = "🧘";
 
       const planText = `Rest ${weeklyRemaining} | ${modeEmoji} ${weekMode}`;
 
-      // --- 7) Wellness PUT für HEUTE ---
+      // --- 7) Wellness PUT ---
       const payload = {
         id: today,
         [dailyField]: dailyTarget,
@@ -155,6 +161,7 @@ export default {
         `OK: Tagesziel=${dailyTarget}, WochenPlan="${planText}"`,
         { status: 200 }
       );
+
     } catch (err) {
       return new Response("Unexpected error: " + err.toString(), {
         status: 500,
@@ -162,3 +169,4 @@ export default {
     }
   },
 };
+
