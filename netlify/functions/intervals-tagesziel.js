@@ -8,6 +8,8 @@ exports.handler = async function () {
     process.env.INTERVALS_TARGET_FIELD || "TageszielTSS";   // z.B. "TageszielTSS"
   const weeklyField =
     process.env.INTERVALS_WEEKLY_FIELD || "WochenzielTSS"; // Rest-Wochenziel
+  const planField =
+    process.env.INTERVALS_PLAN_FIELD || "WochenPlan";      // Textfeld für Build/Halten/Deload
 
   if (!apiKey || !athleteId) {
     console.error(
@@ -28,7 +30,7 @@ exports.handler = async function () {
   const mondayStr = mondayDate.toISOString().slice(0, 10);
 
   try {
-    // 1) Wellness heute holen (ctl/atl)
+    // 1) Wellness heute holen (ctl/atl/rampRate)
     const wellnessRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
       {
@@ -49,6 +51,7 @@ exports.handler = async function () {
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl;
     const atl = wellness.atl;
+    const rampRate = wellness.rampRate ?? 0;
 
     if (ctl == null || atl == null) {
       console.log(`${today}: Keine ctl/atl-Daten vorhanden.`);
@@ -70,8 +73,10 @@ exports.handler = async function () {
 
     const dailyTarget = Math.round(dailyTss);
 
-    // 3) Wochen-Target aus Montag ableiten
+    // 3) Wochen-Target aus Montag ableiten (DailyMontag * Faktor)
     let weeklyTarget = null;
+    let weekMode = "Maintain";
+    let weekFactor = 7;
 
     // Wellness vom Montag holen
     const mondayWellnessRes = await fetch(
@@ -85,32 +90,22 @@ exports.handler = async function () {
       }
     );
 
+    let dailyMonTarget = null;
+
     if (mondayWellnessRes.ok) {
       const mondayWellness = await mondayWellnessRes.json();
-      const ctlMon = mondayWellness.ctl;
-      const atlMon = mondayWellness.atl;
+      const ctlMon = mondayWellness.ctl ?? ctl;
+      const atlMon = mondayWellness.atl ?? atl;
 
-      if (ctlMon != null && atlMon != null) {
-        let tsbMon = ctlMon - atlMon;
-        const tsbMonClamped = Math.max(-20, Math.min(20, tsbMon));
-        let dailyMonTss = ctlMon * (base + k * tsbMonClamped);
+      let tsbMon = ctlMon - atlMon;
+      const tsbMonClamped = Math.max(-20, Math.min(20, tsbMon));
+      let dailyMonTss = ctlMon * (base + k * tsbMonClamped);
 
-        if (dailyMonTss < 0) dailyMonTss = 0;
-        const maxMonTss = ctlMon * 1.5;
-        if (dailyMonTss > maxMonTss) dailyMonTss = maxMonTss;
+      if (dailyMonTss < 0) dailyMonTss = 0;
+      const maxMonTss = ctlMon * 1.5;
+      if (dailyMonTss > maxMonTss) dailyMonTss = maxMonTss;
 
-        const dailyMonTarget = Math.round(dailyMonTss);
-
-        weeklyTarget = dailyMonTarget * 7;
-        console.log(
-          `${today}: Wochenziel-Target aus Montag berechnet: dailyMon=${dailyMonTarget}, weeklyTarget=${weeklyTarget}`
-        );
-      } else {
-        console.log(
-          `${today}: Montag hat keine ctl/atl – fallback auf heutiges Tagesziel.`
-        );
-        weeklyTarget = dailyTarget * 7;
-      }
+      dailyMonTarget = Math.round(dailyMonTss);
     } else {
       const txt = await mondayWellnessRes.text();
       console.log(
@@ -118,9 +113,31 @@ exports.handler = async function () {
         mondayWellnessRes.status,
         txt
       );
-      // Fallback: heutiges Tagesziel als Basis
-      weeklyTarget = dailyTarget * 7;
+      // Fallback auf heutiges Tagesziel
+      dailyMonTarget = dailyTarget;
     }
+
+    // 3a) Woche klassifizieren (Build / Maintain / Deload)
+    const tsbToday = ctl - atl;
+
+    if (rampRate <= -0.5 && tsbToday >= -5) {
+      weekMode = "Build";
+      weekFactor = 8.0;    // etwas mehr als 7x Tagesziel
+    } else if (rampRate >= 1.0 || tsbToday <= -10 || atl > ctl + 5) {
+      weekMode = "Deload";
+      weekFactor = 5.5;    // bewusst weniger
+    } else {
+      weekMode = "Maintain";
+      weekFactor = 7.0;    // gleichbleibende Fitness
+    }
+
+    weeklyTarget = Math.round(dailyMonTarget * weekFactor);
+
+    console.log(
+      `${today}: Wochenmodus=${weekMode}, dailyMon=${dailyMonTarget}, weeklyTarget=${weeklyTarget}, rampRate=${rampRate.toFixed(
+        2
+      )}, TSB=${tsbToday.toFixed(2)}`
+    );
 
     // 4) Bisherige Wochen-Load (Montag–heute) summieren (ctlLoad)
     let weekLoad = 0;
@@ -164,14 +181,23 @@ exports.handler = async function () {
       weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
     }
 
+    // Text für WochenPlan bauen
+    let planText = `${weekMode}: Ziel ~${weeklyTarget} TSS, Rest ~${weeklyRemaining ?? 0} TSS (rampRate ${rampRate.toFixed(
+      2
+    )}, TSB ${tsbToday.toFixed(1)})`;
+
     // 6) Payload für heute bauen
     const payload = {
       id: today,
-      [dailyField]: dailyTarget, // Tagesziel immer setzen
+      [dailyField]: dailyTarget, // Tagesziel
     };
 
     if (weeklyRemaining != null) {
       payload[weeklyField] = weeklyRemaining; // Rest-Wochenziel
+    }
+
+    if (planField) {
+      payload[planField] = planText;
     }
 
     // 7) Wellness für heute updaten
@@ -200,14 +226,12 @@ exports.handler = async function () {
         2
       )}, Tagesziel=${dailyTarget}${
         weeklyRemaining != null ? `, Wochenrest=${weeklyRemaining}` : ""
-      }`
+      }, Modus=${weekMode}`
     );
 
     return {
       statusCode: 200,
-      body: `OK: Tagesziel=${dailyTarget}${
-        weeklyRemaining != null ? `, Wochenrest=${weeklyRemaining}` : ""
-      }`,
+      body: `OK: Tagesziel=${dailyTarget}, Wochenrest=${weeklyRemaining}, Modus=${weekMode}`,
     };
   } catch (err) {
     console.error("Unerwarteter Fehler:", err);
