@@ -82,7 +82,9 @@ async function simulatePlannedWeeks(
     if (simState === "Müde") {
       nextTarget = Math.round(prevTarget * 0.8);      // Erholungswoche
     } else {
-      if (rampSim < 0.5) nextTarget = Math.round(prevTarget * 1.15);
+      if (rampSim < 0.5) {
+  nextTarget = Math.round(prevTarget * (prevState === "Müde" ? 1.10 : 1.15));
+}
       else if (rampSim < 0.8) nextTarget = Math.round(prevTarget * 1.10);
       else if (rampSim <= 1.3) nextTarget = Math.round(prevTarget * 1.05);
       else if (rampSim <= 1.6) nextTarget = Math.round(prevTarget * 0.92);
