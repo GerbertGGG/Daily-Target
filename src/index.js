@@ -222,12 +222,33 @@ export default {
       // --- 4) Zustand der aktuellen Woche (Erholt/Normal/Müde) ---
       const { state: weekState } = classifyWeek(ctl, atl, rampRate);
 
-      // Wochenfaktor bestimmen
-      let factor = 7; // Normal
-      if (weekState === "Erholt") factor = 8;
-      if (weekState === "Müde") factor = 5.5;
+// Basis-Faktor je nach Zustand
+let factor = 7; // Normal
+if (weekState === "Erholt") factor = 8;
+if (weekState === "Müde") factor = 5.5;
 
-      const weeklyTarget = Math.round(dailyMonTarget * factor);
+// Basis-Wochenziel aus Montag
+let weeklyTarget = dailyMonTarget * factor;
+
+// 🎯 Ramp-Ziel: ca. 1.0 CTL/Woche (zwischen 0.8 und 1.3)
+const targetRampMid = 1.0;
+
+// Nur wenn du NICHT müde bist, drehen wir an der Stellschraube
+if (weekState !== "Müde") {
+  // positive rampError = zu flach -> mehr Load
+  const rampError = targetRampMid - rampRate;
+
+  // Verstärkung: 0.1  -> bei rampRate 0.3 ~ +7%
+  let adjust = 1 + rampError * 0.1;
+
+  // Sicherheits-Caps: max +15%, min -10%
+  adjust = Math.max(0.9, Math.min(1.15, adjust));
+
+  weeklyTarget = weeklyTarget * adjust;
+}
+
+// final runden
+weeklyTarget = Math.round(Math.max(0, weeklyTarget));
 
       // --- 5) Bisherige Wochen-Load (Montag–heute) summieren (ctlLoad) ---
       let weekLoad = 0;
