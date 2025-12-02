@@ -1,8 +1,8 @@
 const BASE_URL = "https://intervals.icu/api/v1";
 
 // 🔥 Hardcoded Variablen – HIER deine Werte eintragen!
-const INTERVALS_API_KEY = "DEIN_INTERVALS_API_KEY_HIER";     // z.B. 1xg1v0...
-const INTERVALS_ATHLETE_ID = "DEINE_ATHLETE_ID_HIER";        // z.B. i104975
+const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";     // z.B. 1xg1v0...
+const INTERVALS_ATHLETE_ID = "i105857";        // z.B. i104975
 const INTERVALS_TARGET_FIELD = "TageszielTSS";               // numerisches Feld in Wellness
 const INTERVALS_PLAN_FIELD = "WochenPlan";                   // Textfeld in Wellness
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";                 // numerisches Feld für Wochenziel
