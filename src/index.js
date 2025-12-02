@@ -5,7 +5,8 @@ const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";     // z.B. 1xg1v0...
 const INTERVALS_ATHLETE_ID = "i105857";        // z.B. i104975
 const INTERVALS_TARGET_FIELD = "TageszielTSS";               // numerisches Feld in Wellness
 const INTERVALS_PLAN_FIELD = "WochenPlan";                   // Textfeld in Wellness
-const WEEKLY_TARGET_FIELD = "WochenzielTSS";                 // numerisches Feld für Wochenziel
+const WEEKLY_TARGET_FIELD = "WochenzielTSS";  
+const DAILY_TYPE_FIELD = "TagesTyp";// numerisches Feld für Wochenziel
 
 function computeDailyTarget(ctl, atl) {
   const base = 1.0;
@@ -74,7 +75,6 @@ async function simulatePlannedWeeks(
   let atlStart = atlMon0;
 
   let prevTarget = weeklyTarget0;
-  let prevState = weekState0;
 
   // Wir simulieren ab Woche 1 (Woche 0 = aktuelle Woche)
   for (let w = 1; w < weeksToSim; w++) {
@@ -138,7 +138,6 @@ async function simulatePlannedWeeks(
     ctlStart = ctlEnd;
     atlStart = atlEnd;
     prevTarget = nextTarget;
-    prevState = nextState;
   }
 }
 
@@ -151,6 +150,7 @@ export default {
     const dailyField = INTERVALS_TARGET_FIELD;
     const planField = INTERVALS_PLAN_FIELD;
     const weeklyTargetField = WEEKLY_TARGET_FIELD;
+    const dailyTypeField = DAILY_TYPE_FIELD;
 
     if (!apiKey || !athleteId) {
       return new Response("Missing hardcoded config", { status: 500 });
@@ -194,8 +194,14 @@ export default {
         return new Response("No ctl/atl data", { status: 200 });
       }
 
-      // --- 2) Tagesziel (heute) berechnen ---
-      const dailyTarget = computeDailyTarget(ctl, atl);
+      // Schlaf & HRV
+      const sleepSecs = wellness.sleepSecs ?? null;
+      const sleepScore = wellness.sleepScore ?? null;
+      const hrv = wellness.hrv ?? null;
+      const sleepHours = sleepSecs != null ? sleepSecs / 3600 : null;
+
+      // --- 2) Basis-Tagesziel (ohne Schlaf/HRV) ---
+      const dailyTargetBase = computeDailyTarget(ctl, atl);
 
       // --- 3) Montag-Wellness holen für Wochenbasis ---
       const mondayWellnessRes = await fetch(
@@ -216,39 +222,18 @@ export default {
         // Fallback: heutige Werte nehmen
         ctlMon = ctl;
         atlMon = atl;
-        dailyMonTarget = dailyTarget;
+        dailyMonTarget = dailyTargetBase;
       }
 
       // --- 4) Zustand der aktuellen Woche (Erholt/Normal/Müde) ---
       const { state: weekState } = classifyWeek(ctl, atl, rampRate);
 
-// Basis-Faktor je nach Zustand
-let factor = 7; // Normal
-if (weekState === "Erholt") factor = 8;
-if (weekState === "Müde") factor = 5.5;
+      // Wochenfaktor bestimmen
+      let factor = 7; // Normal
+      if (weekState === "Erholt") factor = 8;
+      if (weekState === "Müde") factor = 5.5;
 
-// Basis-Wochenziel aus Montag
-let weeklyTarget = dailyMonTarget * factor;
-
-// 🎯 Ramp-Ziel: ca. 1.0 CTL/Woche (zwischen 0.8 und 1.3)
-const targetRampMid = 1.0;
-
-// Nur wenn du NICHT müde bist, drehen wir an der Stellschraube
-if (weekState !== "Müde") {
-  // positive rampError = zu flach -> mehr Load
-  const rampError = targetRampMid - rampRate;
-
-  // Verstärkung: 0.1  -> bei rampRate 0.3 ~ +7%
-  let adjust = 1 + rampError * 0.1;
-
-  // Sicherheits-Caps: max +15%, min -10%
-  adjust = Math.max(0.9, Math.min(1.15, adjust));
-
-  weeklyTarget = weeklyTarget * adjust;
-}
-
-// final runden
-weeklyTarget = Math.round(Math.max(0, weeklyTarget));
+      let weeklyTarget = Math.round(dailyMonTarget * factor);
 
       // --- 5) Bisherige Wochen-Load (Montag–heute) summieren (ctlLoad) ---
       let weekLoad = 0;
@@ -270,16 +255,67 @@ weeklyTarget = Math.round(Math.max(0, weeklyTarget));
         Math.round(weeklyTarget - weekLoad)
       );
 
-      // --- 6) WochenPlan-Text für HEUTE ---
+      // --- 6) TagesTyp bestimmen & Tagesziel anpassen (Schlaf + HRV + Woche) ---
+      let dayType = "Solide";
+      let dayEmoji = "🟡";
+      let dailyAdj = 1.0;
+
+      let goodRecovery = false;
+      let badRecovery = false;
+      let veryBadRecovery = false;
+
+      if (sleepScore != null && sleepScore >= 80) goodRecovery = true;
+      if (sleepScore != null && sleepScore <= 60) badRecovery = true;
+      if (sleepScore != null && sleepScore <= 50) veryBadRecovery = true;
+
+      if (sleepHours != null && sleepHours >= 8) goodRecovery = true;
+      if (sleepHours != null && sleepHours <= 6) badRecovery = true;
+      if (sleepHours != null && sleepHours <= 5.5) veryBadRecovery = true;
+
+      if (hrv != null && hrv >= 42) goodRecovery = true;
+      if (hrv != null && hrv <= 35) badRecovery = true;
+      if (hrv != null && hrv <= 30) veryBadRecovery = true;
+
+      if (weekState === "Müde" || veryBadRecovery) {
+        if (veryBadRecovery) {
+          dayType = "Rest";
+          dayEmoji = "⚪";
+          dailyAdj = 0.4;
+        } else {
+          dayType = "Locker";
+          dayEmoji = "🟢";
+          dailyAdj = 0.7;
+        }
+      } else if (weekState === "Erholt" && goodRecovery) {
+        dayType = "Schlüssel";
+        dayEmoji = "🔴";
+        dailyAdj = 1.1;
+      } else if (badRecovery) {
+        dayType = "Locker";
+        dayEmoji = "🟢";
+        dailyAdj = 0.8;
+      } else {
+        dayType = "Solide";
+        dayEmoji = "🟡";
+        dailyAdj = 1.0;
+      }
+
+      // Sicherheitskappe
+      dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
+
+      const dailyTarget = Math.round(dailyTargetBase * dailyAdj);
+
+      // --- 7) WochenPlan-Text für HEUTE ---
       const emojiToday = stateEmoji(weekState);
       const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-      // --- 7) Wellness für HEUTE updaten (Ist-Woche) ---
+      // --- 8) Wellness für HEUTE updaten (Ist-Woche) ---
       const payloadToday = {
         id: today,
-        [dailyField]: dailyTarget,        // TageszielTSS
+        [dailyField]: dailyTarget,        // TageszielTSS (adjusted)
         [planField]: planTextToday,       // WochenPlan (Rest + Emoji + Zustand)
-        [weeklyTargetField]: weeklyTarget // WochenzielTSS (volles Wochenziel)
+        [weeklyTargetField]: weeklyTarget,// WochenzielTSS (volles Wochenziel)
+        [dailyTypeField]: `${dayEmoji} ${dayType}` // TagesTyp
       };
 
       const updateRes = await fetch(
@@ -302,8 +338,8 @@ weeklyTarget = Math.round(Math.max(0, weeklyTarget));
         );
       }
 
-      // --- 8) Zukunfts-Wochen simulieren (aktuelle + 3 weitere Montage) ---
-      const WEEKS_TO_SIMULATE = 9; // 0 = aktuelle Woche, 1-3 = Zukunft
+      // --- 9) Zukunfts-Wochen simulieren (aktuelle + x weitere Montage) ---
+      const WEEKS_TO_SIMULATE = 4; // 0 = aktuelle Woche, 1-3 = Zukunft
       await simulatePlannedWeeks(
         ctlMon,
         atlMon,
@@ -318,7 +354,7 @@ weeklyTarget = Math.round(Math.max(0, weeklyTarget));
       );
 
       return new Response(
-        `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}, WochenPlan="${planTextToday}"`,
+        `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}, TagesTyp="${dayEmoji} ${dayType}", WochenPlan="${planTextToday}"`,
         { status: 200 }
       );
 
