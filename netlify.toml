@@ -1,0 +1,8 @@
+[functions]
+  node_bundler = "esbuild"
+
+[[functions]]
+  name = "intervals-tagesziel"
+  # Cron-Schedule im UTC!
+  # "1 23 * * *" = 23:01 UTC → 00:01 Europa/Berlin (Winterzeit)
+  schedule = "1 23 * * *"
