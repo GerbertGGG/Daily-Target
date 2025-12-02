@@ -180,7 +180,8 @@ async function simulatePlannedWeeks(
     ctlStart = ctlEnd;
     atlStart = atlEnd;
     prevTarget = nextTarget;
-  
+    prevState = simState;
+  }
 }
 
 // ---- Worker-Handler ------------------------------------------------
