@@ -8,10 +8,8 @@ const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp";
 
-// Wie viele Trainingstage planen wir pro Woche realistisch?
-const TRAINING_DAYS_PER_WEEK = 4.5; // z.B. 4.0 oder 5.0
-
-
+// realistische Anzahl Trainingstage pro Woche
+const TRAINING_DAYS_PER_WEEK = 4.5;
 
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
@@ -41,11 +39,11 @@ function stateEmoji(state) {
   return "⚖️";
 }
 
-// Nächstes Event (RACE/TARGET oder erstes Event) holen
+// Nächstes Event holen
 async function getNextEventDate(athleteId, authHeader, todayStr) {
   const todayDate = new Date(todayStr + "T00:00:00Z");
   const futureDate = new Date(todayDate);
-  futureDate.setUTCDate(futureDate.getUTCDate() + 90);
+  futureDate.setUTCDate(todayDate.getUTCDate() + 90);
   const futureStr = futureDate.toISOString().slice(0, 10);
 
   const res = await fetch(
@@ -91,7 +89,7 @@ async function getNextEventDate(athleteId, authHeader, todayStr) {
   };
 }
 
-// Taperlänge so wählen, dass Form (TSB) am Event-Tag >= 0 ist
+// Taperlänge so wählen, dass TSB am Event-Tag >= 0 ist
 function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
   if (daysToEvent <= 0) return 0;
 
@@ -136,7 +134,7 @@ function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
   return chosen;
 }
 
-// Zukunfts-Wochen simulieren (RampRate-Regler, Variante B)
+// Zukunfts-Wochen simulieren
 async function simulatePlannedWeeks(
   ctlMon0,
   atlMon0,
@@ -227,7 +225,7 @@ async function simulatePlannedWeeks(
 }
 
 // ---------------------------------------------------------
-// HAUPTLOGIK – wird von fetch UND scheduled benutzt
+// HAUPTLOGIK
 // ---------------------------------------------------------
 
 async function handle() {
@@ -330,7 +328,7 @@ async function handle() {
 
         if (taperDays > 0 && evt.daysToEvent <= taperDays) {
           const taperStartIndex = evt.daysToEvent - taperDays;
-          const dayIndex = 0; // heute
+          const dayIndex = 0;
 
           let progress = 0;
           if (taperDays <= 1) {
@@ -373,7 +371,7 @@ async function handle() {
     }
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
-    // 6) TagesTyp + Schlaf/HRV/TSB
+    // 6) TagesTyp
     let dayType = "Solide";
     let dayEmoji = "🟡";
     let dailyAdj = 1.0;
@@ -423,49 +421,47 @@ async function handle() {
 
     dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
 
-    // 7) Tagesziel OHNE explizites "Aufholen" über Wochenrest
+    // 7) Tagesziel OHNE explizites „Aufholen“
 
-// a) Wochen-Sicht: wie viel TSS pro Trainingstag wäre logisch?
-const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+    // a) Wochen-Sicht: TSS pro Trainingstag
+    const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
 
-// b) Fitness-Sicht: was sagt CTL/ATL + Tageszustand?
-const baseFromFitness = dailyTargetBase * taperDailyFactor * dailyAdj;
+    // b) Fitness-Sicht
+    const baseFromFitness = dailyTargetBase * taperDailyFactor * dailyAdj;
 
-// c) Kombinieren: Mischung aus Wochenziel und aktueller Form
-const combinedBase = 0.5 * targetFromWeek + 0.5 * baseFromFitness;
+    // c) Kombination aus Woche & Fitness
+    const combinedBase = 0.5 * targetFromWeek + 0.5 * baseFromFitness;
 
-// d) Form-Faktor aus TSB
-let tsbFactor = 1.0;
-if (tsb >= 10) tsbFactor = 1.3;
-else if (tsb >= 5) tsbFactor = 1.15;
-else if (tsb <= -10) tsbFactor = 0.7;
-else if (tsb <= -5) tsbFactor = 0.85;
+    // d) Form-Faktor (TSB)
+    let tsbFactor = 1.0;
+    if (tsb >= 10) tsbFactor = 1.3;
+    else if (tsb >= 5) tsbFactor = 1.15;
+    else if (tsb <= -10) tsbFactor = 0.7;
+    else if (tsb <= -5) tsbFactor = 0.85;
 
-// e) Intensitäts-Faktor aus TagesTyp
-let typeFactor = 1.0;
-if (dayType === "Schlüssel") typeFactor = 1.4;
-else if (dayType === "Locker") typeFactor = 0.7;
-else if (dayType === "Rest") typeFactor = 0.0;
+    // e) Intensitäts-Faktor aus TagesTyp
+    let typeFactor = 1.0;
+    if (dayType === "Schlüssel") typeFactor = 1.4;
+    else if (dayType === "Locker") typeFactor = 0.7;
+    else if (dayType === "Rest") typeFactor = 0.0;
 
-// Rohes Tagesziel aus Wochenziel, Fitness, Form und TagesTyp
-let dailyTargetRaw = combinedBase * tsbFactor * typeFactor;
+    let dailyTargetRaw = combinedBase * tsbFactor * typeFactor;
 
-// f) Harte Obergrenze: wir übertreiben nicht, aber 50–60 TSS an guten Tagen sind erlaubt
-const maxDailyByCtl = ctl * 3.0;              // z.B. CTL 20 -> 60 TSS
-const maxDailyByWeek = targetFromWeek * 2.0;  // z.B. 140/4.5*2 ~ 62
-const maxDaily = Math.max(
-  baseFromFitness,
-  Math.min(maxDailyByCtl, maxDailyByWeek)
-);
+    // f) Obergrenzen: 50–60 TSS an guten Tagen erlaubt, aber nicht völlig drüber
+    const maxDailyByCtl = ctl * 3.0;             // z.B. CTL 20 -> 60
+    const maxDailyByWeek = targetFromWeek * 2.0; // z.B. 140/4.5*2 ~ 62
+    const maxDaily = Math.max(
+      baseFromFitness,
+      Math.min(maxDailyByCtl, maxDailyByWeek)
+    );
 
-// Resttag = komplett frei
-if (dayType === "Rest") {
-  dailyTargetRaw = 0;
-}
+    if (dayType === "Rest") {
+      dailyTargetRaw = 0;
+    }
 
-const dailyTarget = Math.round(
-  Math.max(0, Math.min(dailyTargetRaw, maxDaily))
-);
+    const dailyTarget = Math.round(
+      Math.max(0, Math.min(dailyTargetRaw, maxDaily))
+    );
 
     // 8) WochenPlan
     const emojiToday = stateEmoji(weekState);
@@ -473,31 +469,22 @@ const dailyTarget = Math.round(
 
     // 9) Erklärungstext
     let reason = "";
-    const usedCatchup = catchupPerDay > planTarget + 1;
-    const hasWeeklyDebt = weeklyRemaining > 0;
 
     if (dayType === "Rest") {
-      reason = `${dayEmoji} Resttag: Deine Erholung (Schlaf/HRV) oder Ermüdung sprechen für wenig bis kein Training heute.`;
+      reason = `${dayEmoji} Resttag: Deine Erholung (Schlaf/HRV) oder Ermüdung sprechen heute für wenig bis kein Training.`;
     } else if (dayType === "Locker") {
-      reason = `${dayEmoji} Lockerer Tag: Erholung ist noch nicht optimal, deshalb nur eine leichtere Einheit mit reduziertem Zielwert.`;
+      reason = `${dayEmoji} Lockerer Tag: Erholung ist nicht optimal, daher nur eine leichtere Einheit angepasst an deine aktuelle Fitness (CTL) und Form (TSB).`;
     } else if (dayType === "Schlüssel") {
-      reason = `${dayEmoji} Schlüsseltag: Gute Erholung und Form (TSB) erlauben eine intensivere Einheit mit höherem Tagesziel.`;
+      reason = `${dayEmoji} Schlüsseltag: Gute Erholung und Form erlauben heute eine intensivere Einheit mit höherem Tagesziel.`;
     } else {
-      reason = `${dayEmoji} Solider Tag: Normale Belastung basierend auf deiner aktuellen Fitness (CTL) und der Wochenplanung.`;
+      reason = `${dayEmoji} Solider Tag: Normale Belastung basierend auf deiner aktuellen Fitness (CTL) und dem geplanten Wochenumfang.`;
     }
 
-    if (usedCatchup && dayType !== "Rest") {
-      reason += " Du hast noch Rückstand auf dein Wochenziel, daher ist das Tagesziel heute etwas höher angesetzt.";
-    }
-    if (inTaper) {
-      reason += " Du befindest dich in einer Taperphase vor einem Event, darum ist die Gesamtbelastung leicht reduziert.";
-    }
-    if (!hasWeeklyDebt && dayType !== "Rest") {
-      reason += " Dein Wochenziel ist nahezu erreicht, daher muss heute nicht mehr viel aufgeholt werden.";
+    if (inTaper && dayType !== "Rest") {
+      reason += " Du befindest dich in einer Taperphase vor einem Event, daher ist die Belastung insgesamt leicht reduziert.";
     }
 
-    
-
+    // 10) Wellness heute updaten
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: dailyTarget,
@@ -520,7 +507,6 @@ const dailyTarget = Math.round(
         body: JSON.stringify(payloadToday)
       }
     );
-
     if (!updateRes.ok) {
       const text = await updateRes.text();
       return new Response(
@@ -529,7 +515,7 @@ const dailyTarget = Math.round(
       );
     }
 
-    // 10) Zukünftige Wochen planen
+    // 11) Zukünftige Wochen planen
     const WEEKS_TO_SIMULATE = 7;
     await simulatePlannedWeeks(
       ctlMon,
@@ -557,7 +543,7 @@ const dailyTarget = Math.round(
 }
 
 // ---------------------------------------------------------
-// EXPORT: HTTP + CRON
+// EXPORT
 // ---------------------------------------------------------
 
 export default {
