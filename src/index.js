@@ -430,22 +430,36 @@ async function handle() {
 
     // --- NEU: verbleibende Tage dieser Woche (inkl. heute) für Catch-Up ---
     const MS_PER_DAY = 24 * 60 * 60 * 1000;
-    const daysSinceMonday = Math.round(
-      (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
-    );
-    const remainingDays = Math.max(1, 7 - daysSinceMonday);
+const daysSinceMonday = Math.round(
+  (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
+);
+const remainingDays = Math.max(1, 7 - daysSinceMonday);
 
-    // --- Catch-Up-Logik ---
-    const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
-    const catchupPerDay = weeklyRemaining > 0
-      ? weeklyRemaining / remainingDays
-      : 0;
+// Wir tun so, als wären nur TRAINING_DAYS_PER_WEEK davon echte Trainingstage
+const trainingDensity = TRAINING_DAYS_PER_WEEK / 7;
+const effectiveRemaining = Math.max(1, remainingDays * trainingDensity);
 
-    // Hard-Cap nach oben, damit es nicht völlig eskaliert (max +50 % über Plan)
-    const rawDailyTarget = Math.max(planTarget, catchupPerDay);
-    const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * 1.5);
+// --- Basis-Tagesziel (Plan) ---
+const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
 
-    const dailyTarget = Math.round(cappedDailyTarget);
+// --- Catch-Up-Logik: auf effektive Trainingstage verteilen ---
+let catchupPerDay = 0;
+if (weeklyRemaining > 0) {
+  catchupPerDay = weeklyRemaining / effectiveRemaining;
+}
+
+// Wenn echter Rest-Tag: kein Catch-Up erzwingen
+let rawDailyTarget;
+if (dayType === "Rest") {
+  rawDailyTarget = 0; // echter Off-Day
+} else {
+  rawDailyTarget = Math.max(planTarget, catchupPerDay);
+}
+
+// Hard-Cap nach oben, damit es nicht völlig eskaliert (max +50 % über Plan)
+const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * 1.5);
+
+const dailyTarget = Math.round(cappedDailyTarget);
 
     // 7) WochenPlan
     const emojiToday = stateEmoji(weekState);
