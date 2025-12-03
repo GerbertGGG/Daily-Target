@@ -11,8 +11,7 @@ const DAILY_TYPE_FIELD = "TagesTyp";
 // Wie viele Trainingstage planen wir pro Woche realistisch?
 const TRAINING_DAYS_PER_WEEK = 4.5; // z.B. 4.0 oder 5.0
 
-// Debug-Ausgabe in TagesTyp-Feld?
-const DEBUG_MODE = true;
+
 
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
@@ -424,44 +423,49 @@ async function handle() {
 
     dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
 
-    // 7) verbleibende Tage & effektive Trainingstage
-    const MS_PER_DAY = 24 * 60 * 60 * 1000;
-    const daysSinceMonday = Math.round(
-      (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
-    );
-    const remainingDays = Math.max(1, 7 - daysSinceMonday);
+    // 7) Tagesziel OHNE explizites "Aufholen" über Wochenrest
 
-    const trainingDensity = TRAINING_DAYS_PER_WEEK / 7;
-    const effectiveRemaining = Math.max(1, remainingDays * trainingDensity);
+// a) Wochen-Sicht: wie viel TSS pro Trainingstag wäre logisch?
+const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
 
-    // Basis-Tagesziel
-    const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+// b) Fitness-Sicht: was sagt CTL/ATL + Tageszustand?
+const baseFromFitness = dailyTargetBase * taperDailyFactor * dailyAdj;
 
-    // Catch-Up
-    let catchupMultiplier = 1.0;
-    if (tsb >= 10) catchupMultiplier = 1.3;
-    else if (tsb <= -10) catchupMultiplier = 0.5;
+// c) Kombinieren: Mischung aus Wochenziel und aktueller Form
+const combinedBase = 0.5 * targetFromWeek + 0.5 * baseFromFitness;
 
-    let catchupPerDay = 0;
-    if (weeklyRemaining > 0) {
-      catchupPerDay = (weeklyRemaining / effectiveRemaining) * catchupMultiplier;
-    }
+// d) Form-Faktor aus TSB
+let tsbFactor = 1.0;
+if (tsb >= 10) tsbFactor = 1.3;
+else if (tsb >= 5) tsbFactor = 1.15;
+else if (tsb <= -10) tsbFactor = 0.7;
+else if (tsb <= -5) tsbFactor = 0.85;
 
-    let rawDailyTarget;
-    if (dayType === "Rest") {
-      rawDailyTarget = 0;
-      catchupPerDay = 0;
-    } else {
-      rawDailyTarget = Math.max(planTarget, catchupPerDay);
-    }
+// e) Intensitäts-Faktor aus TagesTyp
+let typeFactor = 1.0;
+if (dayType === "Schlüssel") typeFactor = 1.4;
+else if (dayType === "Locker") typeFactor = 0.7;
+else if (dayType === "Rest") typeFactor = 0.0;
 
-    // Cap abhängig von Form
-    let maxFactor = 1.5;
-    if (tsb >= 10) maxFactor = 1.8;
-    else if (tsb <= -10) maxFactor = 1.2;
+// Rohes Tagesziel aus Wochenziel, Fitness, Form und TagesTyp
+let dailyTargetRaw = combinedBase * tsbFactor * typeFactor;
 
-    const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * maxFactor);
-    const dailyTarget = Math.round(cappedDailyTarget);
+// f) Harte Obergrenze: wir übertreiben nicht, aber 50–60 TSS an guten Tagen sind erlaubt
+const maxDailyByCtl = ctl * 3.0;              // z.B. CTL 20 -> 60 TSS
+const maxDailyByWeek = targetFromWeek * 2.0;  // z.B. 140/4.5*2 ~ 62
+const maxDaily = Math.max(
+  baseFromFitness,
+  Math.min(maxDailyByCtl, maxDailyByWeek)
+);
+
+// Resttag = komplett frei
+if (dayType === "Rest") {
+  dailyTargetRaw = 0;
+}
+
+const dailyTarget = Math.round(
+  Math.max(0, Math.min(dailyTargetRaw, maxDaily))
+);
 
     // 8) WochenPlan
     const emojiToday = stateEmoji(weekState);
@@ -492,9 +496,7 @@ async function handle() {
       reason += " Dein Wochenziel ist nahezu erreicht, daher muss heute nicht mehr viel aufgeholt werden.";
     }
 
-    if (DEBUG_MODE) {
-      reason += ` [Debug: CTL=${ctl?.toFixed(1)}, ATL=${atl?.toFixed(1)}, TSB=${tsb.toFixed(1)}, base=${dailyTargetBase}, plan=${planTarget.toFixed(1)}, weekRem=${weeklyRemaining}, remDays=${remainingDays}, effDays=${effectiveRemaining.toFixed(2)}, catchUp=${catchupPerDay.toFixed(1)}, maxF=${maxFactor}, daily=${dailyTarget}]`;
-    }
+    
 
     const payloadToday = {
       id: today,
