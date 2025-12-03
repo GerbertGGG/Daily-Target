@@ -389,49 +389,27 @@ if (today === mondayStr) {
     // 6) TagesTyp + Schlaf/HRV-Adjust
     let dayType = "Solide";
     let dayEmoji = "🟡";
-    let dailyAdj = 1.0;
-
-    let goodRecovery = false;
-    let badRecovery = false;
-    let veryBadRecovery = false;
-
-    if (sleepScore != null && sleepScore >= 75) goodRecovery = true;
-    if (sleepScore != null && sleepScore <= 60) badRecovery = true;
-    if (sleepScore != null && sleepScore <= 50) veryBadRecovery = true;
-
-    if (sleepHours != null && sleepHours >= 8) goodRecovery = true;
-    if (sleepHours != null && sleepHours <= 6) badRecovery = true;
-    if (sleepHours != null && sleepHours <= 5.5) veryBadRecovery = true;
-
-    if (hrv != null && hrv >= 42) goodRecovery = true;
-    if (hrv != null && hrv <= 35) badRecovery = true;
-    if (hrv != null && hrv <= 30) veryBadRecovery = true;
-
-    if (weekState === "Müde" || veryBadRecovery) {
-      dayType = "Rest";
-      dayEmoji = "⚪";
-      dailyAdj = 0.4;
-    } else if (goodRecovery && weekState === "Erholt") {
-      dayType = "Schlüssel";
-      dayEmoji = "🔴";
-      dailyAdj = 1.1;
-    } else if (badRecovery) {
-      dayType = "Locker";
-      dayEmoji = "🟢";
-      dailyAdj = 0.8;
-    } else {
-      dayType = "Solide";
-      dayEmoji = "🟡";
-      dailyAdj = 1.0;
-    }
-
     dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
 
-    const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+// --- NEU: verbleibende Tage in dieser Woche (inkl. heute) ---
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const daysSinceMonday = Math.round(
   (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
 );
+// Mindestens 1, damit wir nie durch 0 teilen
+const remainingDays = Math.max(1, 7 - daysSinceMonday);
+
+// --- Catch-Up-Logik ---
+const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+const catchupPerDay = weeklyRemaining > 0
+  ? weeklyRemaining / remainingDays
+  : 0;
+
+// Hard-Cap nach oben, damit es nicht völlig eskaliert (max +50 % über Plan)
+const rawDailyTarget = Math.max(planTarget, catchupPerDay);
+const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * 1.5);
+
+const dailyTarget = Math.round(cappedDailyTarget);
 
 // verbleibende Tage inkl. heute (mindestens 1, damit wir nie durch 0 teilen)
 const remainingDays = Math.max(1, 7 - daysSinceMonday);
