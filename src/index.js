@@ -467,7 +467,7 @@ async function handle() {
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
     // 8) Kommentartext vorbereiten
-    const commentText =
+        const commentText =
       `Erklärung zum heutigen Trainingsziel:\n` +
       `\n` +
       `Wochenziel: ${weeklyTarget} TSS\n` +
@@ -487,8 +487,9 @@ async function handle() {
       `Einschätzung:\n` +
       `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form.\n` +
       `Mehrere Ruhetage erlauben eine höhere Belastung, mehrere Trainingstage hintereinander führen zu einer vorsichtigeren Vorgabe.\n` +
-      `\n" +
+      `\n` +
       `Geplantes Tagesziel heute: ~${dailyTarget} TSS.\n`;
+
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
