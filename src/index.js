@@ -352,105 +352,104 @@ async function handle() {
 
     weeklyTarget = Math.round(weeklyTarget * taperWeeklyFactor);
 
-   
-   // 5) Wochenload summieren + Daten für Mikrozyklus
-let weekLoad = 0;
-let weekArr = [];
-const weekRes = await fetch(
-  `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
-  { headers: { Authorization: authHeader } }
-);
-if (weekRes.ok) {
-  weekArr = await weekRes.json();
-  for (const day of weekArr) {
-    if (day.ctlLoad != null) weekLoad += day.ctlLoad;
-  }
-}
-const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
-// 5b) Mikrozyklus: Ruhe-/Belastungs-Tage in dieser Woche
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const daysSinceMonday = Math.round(
-  (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
-);
+    // 5) Wochenload summieren + Daten für Mikrozyklus
+    let weekLoad = 0;
+    let weekArr = [];
+    const weekRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
+      { headers: { Authorization: authHeader } }
+    );
+    if (weekRes.ok) {
+      weekArr = await weekRes.json();
+      for (const day of weekArr) {
+        if (day.ctlLoad != null) weekLoad += day.ctlLoad;
+      }
+    }
+    const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
-// Map: Datum -> ctlLoad
-const ctlLoadByDate = new Map();
-for (const day of weekArr) {
-  if (day.id && day.ctlLoad != null) {
-    ctlLoadByDate.set(day.id, day.ctlLoad);
-  }
-}
+    // 5b) Mikrozyklus: Ruhe-/Belastungs-Tage in dieser Woche
+    const MS_PER_DAY = 24 * 60 * 60 * 1000;
+    const daysSinceMonday = Math.round(
+      (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
+    );
 
-// Wie lange her ist das letzte Training (inkl. heute)?
-let daysSinceLastTraining = daysSinceMonday + 1; // Default: diese Woche noch nichts
-for (let offset = 0; offset <= daysSinceMonday; offset++) {
-  const d = new Date(todayDate);
-  d.setUTCDate(d.getUTCDate() - offset);
-  const id = d.toISOString().slice(0, 10);
-  const load = ctlLoadByDate.get(id) ?? 0;
-  if (load > 0) {
-    daysSinceLastTraining = offset;
-    break;
-  }
-}
+    const ctlLoadByDate = new Map();
+    for (const day of weekArr) {
+      if (day.id && day.ctlLoad != null) {
+        ctlLoadByDate.set(day.id, day.ctlLoad);
+      }
+    }
 
-// Wie viele Tage in Folge (bis gestern) wurde trainiert?
-let consecutiveTrainingDays = 0;
-for (let offset = 1; offset <= daysSinceMonday; offset++) {
-  const d = new Date(todayDate);
-  d.setUTCDate(d.getUTCDate() - offset);
-  const id = d.toISOString().slice(0, 10);
-  const load = ctlLoadByDate.get(id) ?? 0;
-  if (load > 0) {
-    consecutiveTrainingDays++;
-  } else {
-    break;
-  }
-}
+    // Wie lange her ist das letzte Training (inkl. heute)?
+    let daysSinceLastTraining = daysSinceMonday + 1; // Default: diese Woche noch nichts
+    for (let offset = 0; offset <= daysSinceMonday; offset++) {
+      const d = new Date(todayDate);
+      d.setUTCDate(d.getUTCDate() - offset);
+      const id = d.toISOString().slice(0, 10);
+      const load = ctlLoadByDate.get(id) ?? 0;
+      if (load > 0) {
+        daysSinceLastTraining = offset;
+        break;
+      }
+    }
 
+    // Wie viele Tage in Folge (bis gestern) wurde trainiert?
+    let consecutiveTrainingDays = 0;
+    for (let offset = 1; offset <= daysSinceMonday; offset++) {
+      const d = new Date(todayDate);
+      d.setUTCDate(d.getUTCDate() - offset);
+      const id = d.toISOString().slice(0, 10);
+      const load = ctlLoadByDate.get(id) ?? 0;
+      if (load > 0) {
+        consecutiveTrainingDays++;
+      } else {
+        break;
+      }
+    }
 
-    // 6) Tagesziel – aus Woche, Fitness, Form, Taper
+    // 6) Tagesziel – aus Woche, Fitness, Form, Taper, Mikrozyklus
 
     // a) Wochen-Sicht: TSS pro Trainingstag
-const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+    const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
 
-// b) Fitness-Sicht (CTL/ATL/TSB + Taper)
-const baseFromFitness = dailyTargetBase * taperDailyFactor;
+    // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
+    const baseFromFitness = dailyTargetBase * taperDailyFactor;
 
-// c) Kombination: eher Wochenziel-getrieben
-const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
+    // c) Kombination: eher Wochenziel-getrieben
+    const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
-// d) Form-Faktor (TSB)
-let tsbFactor = 1.0;
-if (tsb >= 10) tsbFactor = 1.4;
-else if (tsb >= 5) tsbFactor = 1.25;
-else if (tsb >= 0) tsbFactor = 1.10;
-else if (tsb <= -15) tsbFactor = 0.5;
-else if (tsb <= -10) tsbFactor = 0.6;
-else if (tsb <= -5) tsbFactor = 0.8;
+    // d) Form-Faktor (TSB)
+    let tsbFactor = 1.0;
+    if (tsb >= 10) tsbFactor = 1.4;
+    else if (tsb >= 5) tsbFactor = 1.25;
+    else if (tsb >= 0) tsbFactor = 1.10;
+    else if (tsb <= -15) tsbFactor = 0.5;
+    else if (tsb <= -10) tsbFactor = 0.6;
+    else if (tsb <= -5) tsbFactor = 0.8;
 
-// e) Mikrozyklus-Faktor: viele Ruhetage / viele Trainingstage
-let microFactor = 1.0;
+    // e) Mikrozyklus-Faktor: viele Ruhetage / viele Trainingstage
+    let microFactor = 1.0;
 
-// 2+ Tage ohne Training → Schub nach oben (wenn Form nicht schlecht)
-if (daysSinceLastTraining >= 2 && tsb >= 0) {
-  microFactor *= 1.25; // +25%
-}
-if (daysSinceLastTraining >= 3 && tsb >= 0) {
-  microFactor *= 1.10; // zusätzlich +10% → insgesamt ~+37%
-}
+    // 2+ Tage ohne Training → Schub nach oben (wenn Form nicht schlecht)
+    if (daysSinceLastTraining >= 2 && tsb >= 0) {
+      microFactor *= 1.25; // +25%
+    }
+    if (daysSinceLastTraining >= 3 && tsb >= 0) {
+      microFactor *= 1.10; // zusätzlich +10% → insgesamt ~+37%
+    }
 
-// 3+ Tage hintereinander trainiert → dämpfen
-if (consecutiveTrainingDays >= 3) {
-  microFactor *= 0.8; // -20%
-}
-if (consecutiveTrainingDays >= 4) {
-  microFactor *= 0.7; // stärker runter
+    // 3+ Tage hintereinander trainiert → dämpfen
+    if (consecutiveTrainingDays >= 3) {
+      microFactor *= 0.8; // -20%
+    }
+    if (consecutiveTrainingDays >= 4) {
+      microFactor *= 0.7; // stärker runter
+    }
 
-// Rohes Tagesziel
-let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
+    // Rohes Tagesziel
+    let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
 
-    // e) Obergrenzen
+    // f) Obergrenzen
     const maxDailyByCtl = ctl * 3.0;             // CTL 20 → max 60
     const maxDailyByWeek = targetFromWeek * 2.5;
     const maxDaily = Math.max(
@@ -467,7 +466,7 @@ let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Kommentartext vorbereiten (WICHTIG: vor payloadToday!)
+    // 8) Kommentartext vorbereiten
     const commentText =
       `Erklärung zum heutigen Trainingsziel:\n` +
       `\n` +
@@ -481,10 +480,14 @@ let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
       `TSB (Form): ${tsb.toFixed(1)}\n` +
       `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
       `\n` +
+      `Mikrozyklus dieser Woche:\n` +
+      `Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}\n` +
+      `Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}\n` +
+      `\n` +
       `Einschätzung:\n` +
       `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form.\n` +
-      `Je höher deine Form (TSB) und je höher dein CTL, desto höher fällt das Tagesziel aus.\n` +
-      `\n` +
+      `Mehrere Ruhetage erlauben eine höhere Belastung, mehrere Trainingstage hintereinander führen zu einer vorsichtigeren Vorgabe.\n` +
+      `\n" +
       `Geplantes Tagesziel heute: ~${dailyTarget} TSS.\n`;
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
