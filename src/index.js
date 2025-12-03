@@ -11,6 +11,9 @@ const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 // realistische Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
+// Laufen ist ca. 1.4x belastender als Rad aus deiner Sicht
+const RUN_FACTOR = 1.4; // 50 "Belastung" Lauf ≈ 70 "Belastung" Rad
+
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
@@ -515,7 +518,7 @@ async function handle() {
       microFactor *= 0.7; // stärker runter
     }
 
-    // Rohes Tagesziel
+    // Rohes Tagesziel (wir interpretieren das als LAUF-TSS)
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
 
     // f) Obergrenzen
@@ -530,6 +533,10 @@ async function handle() {
     const dailyTarget = Math.round(
       Math.min(dailyTargetRaw, maxDaily)
     );
+
+    // sportartspezifische Tagesziele:
+    const runTarget = dailyTarget; // Lauf ist Referenz
+    const bikeTarget = Math.round(runTarget * RUN_FACTOR);
 
     // 7) WochenPlan
     const emojiToday = stateEmoji(weekState);
@@ -562,7 +569,11 @@ async function handle() {
       `dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}\n` +
       `maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
       `\n` +
-      `Geplantes Tagesziel heute (gecapped): ${dailyTarget} TSS\n`;
+      `Geplantes Tagesziel heute (interpretiert als Lauf-TSS, gecapped): ${runTarget} TSS\n` +
+      `\n` +
+      `Sportartspezifisches Tagesziel:\n` +
+      `Laufen: ${runTarget} TSS\n` +
+      `Rad:    ${bikeTarget} TSS (Rad ist orthopädisch weniger belastend, daher höheres TSS-Ziel bei gleicher empfundenen Belastung)\n`;
 
     // Montag: Erklärung zur Vorwoche und eventuellem Rad-Schutz
     if (today === mondayStr && lastWeekTotalTss != null) {
@@ -586,7 +597,7 @@ async function handle() {
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
       id: today,
-      [INTERVALS_TARGET_FIELD]: dailyTarget,
+      [INTERVALS_TARGET_FIELD]: runTarget, // Tagesziel = Lauf-TSS
       [INTERVALS_PLAN_FIELD]: planTextToday,
       comments: commentText
       // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
@@ -631,7 +642,7 @@ async function handle() {
     );
 
     return new Response(
-      `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}`,
+      `OK: Tagesziel(Lauf)=${runTarget}, Rad-Empfehlung=${bikeTarget}, Wochenziel=${weeklyTarget}`,
       { status: 200 }
     );
   } catch (err) {
