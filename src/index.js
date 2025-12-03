@@ -6,8 +6,11 @@ const INTERVALS_ATHLETE_ID = "i105857";                 // z.B. i104975
 const INTERVALS_TARGET_FIELD = "TageszielTSS";          // numerisches Feld in Wellness
 const INTERVALS_PLAN_FIELD = "WochenPlan";              // Textfeld in Wellness
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";            // numerisches Feld für Wochenziel
-const DAILY_TYPE_FIELD = "TagesTyp";                    // Textfeld / Emoji-Feld für TagesTyp
-const TRAINING_DAYS_PER_WEEK = 4.5;
+const DAILY_TYPE_FIELD = "TagesTyp";                    // Textfeld für Tages-Erklärung
+
+// Wie viele Trainingstage planen wir pro Woche realistisch?
+const TRAINING_DAYS_PER_WEEK = 4.5; // z.B. 4.0 oder 5.0
+
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
@@ -278,12 +281,13 @@ async function handle() {
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl;
     const atl = wellness.atl;
-    const tsb = ctl - atl;
     const rampRate = wellness.rampRate ?? 0;
 
     if (ctl == null || atl == null) {
       return new Response("No ctl/atl data", { status: 200 });
     }
+
+    const tsb = ctl - atl; // Form heute
 
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
@@ -335,6 +339,7 @@ async function handle() {
     // 4) Event & dynamische Taperlänge
     let taperDailyFactor = 1.0;
     let taperWeeklyFactor = 1.0;
+    let inTaper = false;
 
     try {
       const evt = await getNextEventDate(athleteId, authHeader, today);
@@ -363,6 +368,8 @@ async function handle() {
           taperWeeklyFactor =
             TAPER_WEEKLY_START +
             (TAPER_WEEKLY_END - TAPER_WEEKLY_START) * progress;
+
+          inTaper = true;
         }
       }
     } catch (e) {
@@ -389,23 +396,10 @@ async function handle() {
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
     // 6) TagesTyp + Schlaf/HRV-Adjust
-    let dayType = "Solide";
+    let dayType = "Solide"; // "Rest", "Locker", "Solide", "Schlüssel"
     let dayEmoji = "🟡";
     let dailyAdj = 1.0;
-// 👉 NEU: TSB als zusätzlicher Faktor
-if (tsb >= 10 && dayType !== "Rest") {
-  // richtig frisch: Schlüssel-Tag leicht pushen
-  dayType = "Schlüssel";
-  dayEmoji = "🔴";
-  dailyAdj = Math.max(dailyAdj, 1.15);
-} else if (tsb <= -15) {
-  // ziemlich platt: lieber Rest/Locker
-  if (dayType === "Schlüssel" || dayType === "Solide") {
-    dayType = "Locker";
-    dayEmoji = "🟢";
-    dailyAdj = Math.min(dailyAdj, 0.8);
-  }
-}
+
     let goodRecovery = false;
     let badRecovery = false;
     let veryBadRecovery = false;
@@ -440,115 +434,32 @@ if (tsb >= 10 && dayType !== "Rest") {
       dailyAdj = 1.0;
     }
 
+    // TSB als zusätzlicher Faktor
+    if (tsb >= 10 && dayType !== "Rest") {
+      // richtig frisch → eher Schlüsseltag
+      dayType = "Schlüssel";
+      dayEmoji = "🔴";
+      dailyAdj = Math.max(dailyAdj, 1.15);
+    } else if (tsb <= -15) {
+      // ziemlich platt → eher locker
+      if (dayType === "Schlüssel" || dayType === "Solide") {
+        dayType = "Locker";
+        dayEmoji = "🟢";
+        dailyAdj = Math.min(dailyAdj, 0.8);
+      }
+    }
+
     dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
 
-    // --- NEU: verbleibende Tage dieser Woche (inkl. heute) für Catch-Up ---
+    // --- verbleibende Tage dieser Woche (inkl. heute) ---
     const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const daysSinceMonday = Math.round(
-  (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
-);
-const remainingDays = Math.max(1, 7 - daysSinceMonday);
-
-// Wir tun so, als wären nur TRAINING_DAYS_PER_WEEK davon echte Trainingstage
-const trainingDensity = TRAINING_DAYS_PER_WEEK / 7;
-const effectiveRemaining = Math.max(1, remainingDays * trainingDensity);
-
-// --- Basis-Tagesziel (Plan) ---
-const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
-
-// --- Catch-Up-Logik: auf effektive Trainingstage verteilen ---
-let catchupPerDay = 0;
-if (weeklyRemaining > 0) {
-  catchupPerDay = weeklyRemaining / effectiveRemaining;
-}
-
-// Wenn echter Rest-Tag: kein Catch-Up erzwingen
-let rawDailyTarget;
-if (dayType === "Rest") {
-  rawDailyTarget = 0; // echter Off-Day
-} else {
-  rawDailyTarget = Math.max(planTarget, catchupPerDay);
-}
-
-// Hard-Cap nach oben, damit es nicht völlig eskaliert (max +50 % über Plan)
-const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * 1.5);
-
-const dailyTarget = Math.round(cappedDailyTarget);
-
-    // 7) WochenPlan
-    const emojiToday = stateEmoji(weekState);
-    const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
-
-    // 8) Wellness HEUTE updaten
-    const payloadToday = {
-      id: today,
-      [INTERVALS_TARGET_FIELD]: dailyTarget,
-      [INTERVALS_PLAN_FIELD]: planTextToday,
-      [DAILY_TYPE_FIELD]: `${dayEmoji} ${dayType}`
-    };
-
-    // WochenzielTSS nur am Montag schreiben
-    if (today === mondayStr) {
-      payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
-    }
-
-    const updateRes = await fetch(
-      `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader
-        },
-        body: JSON.stringify(payloadToday)
-      }
+    const daysSinceMonday = Math.round(
+      (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
     );
+    const remainingDays = Math.max(1, 7 - daysSinceMonday);
 
-    if (!updateRes.ok) {
-      const text = await updateRes.text();
-      return new Response(
-        `Failed to update wellness: ${updateRes.status} ${text}`,
-        { status: 500 }
-      );
-    }
+    // Wir tun so, als wären nur TRAINING_DAYS_PER_WEEK davon echte Trainingstage
+    const trainingDensity = TRAINING_DAYS_PER_WEEK / 7;
+    const effectiveRemaining = Math.max(1, remainingDays * trainingDensity);
 
-    // 9) Zukünftige Wochen planen (aktuelle + 6 weitere Montage)
-    const WEEKS_TO_SIMULATE = 7;
-    await simulatePlannedWeeks(
-      ctlMon,
-      atlMon,
-      weekState,
-      weeklyTarget,
-      mondayDate,
-      WEEKS_TO_SIMULATE,
-      authHeader,
-      athleteId,
-      INTERVALS_PLAN_FIELD,
-      WEEKLY_TARGET_FIELD
-    );
-
-    return new Response(
-      `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}`,
-      { status: 200 }
-    );
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    return new Response("Unexpected error: " + err.toString(), {
-      status: 500
-    });
-  }
-}
-
-// ---------------------------------------------------------
-// EXPORT: HTTP + CRON
-// ---------------------------------------------------------
-
-export default {
-  async fetch(request, env, ctx) {
-    return handle();
-  },
-  async scheduled(event, env, ctx) {
-    // Cron-Trigger ruft dieselbe Logik auf
-    ctx.waitUntil(handle());
-  }
-};
+    // --- Basis-Tageszi
