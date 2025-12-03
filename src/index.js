@@ -9,7 +9,7 @@ const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp";
 
 // realistische Anzahl Trainingstage pro Woche
-const TRAINING_DAYS_PER_WEEK = 4.5;
+const TRAINING_DAYS_PER_WEEK = 4.0; // eher 4 starke Tage → pro Tag mehr TSS
 
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
@@ -43,7 +43,7 @@ function stateEmoji(state) {
 async function getNextEventDate(athleteId, authHeader, todayStr) {
   const todayDate = new Date(todayStr + "T00:00:00Z");
   const futureDate = new Date(todayDate);
-  futureDate.setUTCDate(todayDate.getUTCDate() + 90);
+  futureDate.setUTCDate(futureDate.getUTCDate() + 90);
   const futureStr = futureDate.toISOString().slice(0, 10);
 
   const res = await fetch(
@@ -274,11 +274,6 @@ async function handle() {
     const tsb = ctl - atl;
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
-    const sleepSecs = wellness.sleepSecs ?? null;
-    const sleepScore = wellness.sleepScore ?? null;
-    const hrv = wellness.hrv ?? null;
-    const sleepHours = sleepSecs != null ? sleepSecs / 3600 : null;
-
     // 2) Montag-Werte
     const mondayWellnessRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
@@ -371,120 +366,67 @@ async function handle() {
     }
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
-    // 6) TagesTyp
-    let dayType = "Solide";
-    let dayEmoji = "🟡";
-    let dailyAdj = 1.0;
-
-    let goodRecovery = false;
-    let badRecovery = false;
-    let veryBadRecovery = false;
-
-    if (sleepScore != null && sleepScore >= 75) goodRecovery = true;
-    if (sleepScore != null && sleepScore <= 60) badRecovery = true;
-    if (sleepScore != null && sleepScore <= 50) veryBadRecovery = true;
-
-    if (sleepHours != null && sleepHours >= 8) goodRecovery = true;
-    if (sleepHours != null && sleepHours <= 6) badRecovery = true;
-    if (sleepHours != null && sleepHours <= 5.5) veryBadRecovery = true;
-
-    if (hrv != null && hrv >= 42) goodRecovery = true;
-    if (hrv != null && hrv <= 35) badRecovery = true;
-    if (hrv != null && hrv <= 30) veryBadRecovery = true;
-
-    if (weekState === "Müde" || veryBadRecovery) {
-      dayType = "Rest";
-      dayEmoji = "⚪";
-      dailyAdj = 0.4;
-    } else if (goodRecovery && weekState === "Erholt") {
-      dayType = "Schlüssel";
-      dayEmoji = "🔴";
-      dailyAdj = 1.1;
-    } else if (badRecovery) {
-      dayType = "Locker";
-      dayEmoji = "🟢";
-      dailyAdj = 0.8;
-    }
-
-    // TSB als zusätzlicher Faktor
-    if (tsb >= 10 && dayType !== "Rest") {
-      dayType = "Schlüssel";
-      dayEmoji = "🔴";
-      dailyAdj = Math.max(dailyAdj, 1.15);
-    } else if (tsb <= -15) {
-      if (dayType === "Schlüssel" || dayType === "Solide") {
-        dayType = "Locker";
-        dayEmoji = "🟢";
-        dailyAdj = Math.min(dailyAdj, 0.8);
-      }
-    }
-
-    dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
-
-    // 7) Tagesziel OHNE explizites „Aufholen“
+    // 6) Tagesziel – nur aus Woche, Fitness, Form, Taper
 
     // a) Wochen-Sicht: TSS pro Trainingstag
     const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
 
-    // b) Fitness-Sicht
-    const baseFromFitness = dailyTargetBase * taperDailyFactor * dailyAdj;
+    // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
+    const baseFromFitness = dailyTargetBase * taperDailyFactor;
 
-    // c) Kombination aus Woche & Fitness
-    const combinedBase = 0.5 * targetFromWeek + 0.5 * baseFromFitness;
+    // c) Kombination: eher Wochenziel-Driven
+    const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
     // d) Form-Faktor (TSB)
     let tsbFactor = 1.0;
-    if (tsb >= 10) tsbFactor = 1.3;
-    else if (tsb >= 5) tsbFactor = 1.15;
-    else if (tsb <= -10) tsbFactor = 0.7;
-    else if (tsb <= -5) tsbFactor = 0.85;
+    if (tsb >= 10) tsbFactor = 1.4;
+    else if (tsb >= 5) tsbFactor = 1.25;
+    else if (tsb >= 0) tsbFactor = 1.10;
+    else if (tsb <= -15) tsbFactor = 0.5;
+    else if (tsb <= -10) tsbFactor = 0.6;
+    else if (tsb <= -5) tsbFactor = 0.8;
 
-    // e) Intensitäts-Faktor aus TagesTyp
-    let typeFactor = 1.0;
-    if (dayType === "Schlüssel") typeFactor = 1.4;
-    else if (dayType === "Locker") typeFactor = 0.7;
-    else if (dayType === "Rest") typeFactor = 0.0;
+    let dailyTargetRaw = combinedBase * tsbFactor;
 
-    let dailyTargetRaw = combinedBase * tsbFactor * typeFactor;
-
-    // f) Obergrenzen: 50–60 TSS an guten Tagen erlaubt, aber nicht völlig drüber
-    const maxDailyByCtl = ctl * 3.0;             // z.B. CTL 20 -> 60
-    const maxDailyByWeek = targetFromWeek * 2.0; // z.B. 140/4.5*2 ~ 62
+    // e) Obergrenzen: 50–60 TSS an guten Tagen okay, aber begrenzt
+    const maxDailyByCtl = ctl * 3.0;             // CTL 20 → max 60
+    const maxDailyByWeek = targetFromWeek * 2.5; // z.B. 35*2.5 = 87, aber durch CTL gedeckelt
     const maxDaily = Math.max(
       baseFromFitness,
       Math.min(maxDailyByCtl, maxDailyByWeek)
     );
 
-    if (dayType === "Rest") {
-      dailyTargetRaw = 0;
-    }
-
+    dailyTargetRaw = Math.max(0, dailyTargetRaw);
     const dailyTarget = Math.round(
-      Math.max(0, Math.min(dailyTargetRaw, maxDaily))
+      Math.min(dailyTargetRaw, maxDaily)
     );
 
-    // 8) WochenPlan
+    // 7) WochenPlan
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 9) Erklärungstext
-    let reason = "";
+    // 8) Erklärungstext (ohne „Solide/Locker/Schlüssel“)
+    let reason = `Heutiges Tagesziel basiert auf deinem Wochenziel (${weeklyTarget} TSS bei ca. ${TRAINING_DAYS_PER_WEEK} Trainingstagen ≈ ${targetFromWeek.toFixed(
+      1
+    )} TSS/Tag), deiner aktuellen Fitness (CTL=${ctl.toFixed(
+      1
+    )}) und deiner Form (TSB=${tsb.toFixed(1)}).`;
 
-    if (dayType === "Rest") {
-      reason = `${dayEmoji} Resttag: Deine Erholung (Schlaf/HRV) oder Ermüdung sprechen heute für wenig bis kein Training.`;
-    } else if (dayType === "Locker") {
-      reason = `${dayEmoji} Lockerer Tag: Erholung ist nicht optimal, daher nur eine leichtere Einheit angepasst an deine aktuelle Fitness (CTL) und Form (TSB).`;
-    } else if (dayType === "Schlüssel") {
-      reason = `${dayEmoji} Schlüsseltag: Gute Erholung und Form erlauben heute eine intensivere Einheit mit höherem Tagesziel.`;
-    } else {
-      reason = `${dayEmoji} Solider Tag: Normale Belastung basierend auf deiner aktuellen Fitness (CTL) und dem geplanten Wochenumfang.`;
+    if (tsb >= 5) {
+      reason += " Deine Form ist klar positiv, daher trauen wir dir heute eine etwas höhere Belastung zu.";
+    } else if (tsb >= 0) {
+      reason += " Deine Form ist leicht positiv, daher ist die Belastung moderat bis leicht erhöht.";
+    } else if (tsb <= -10) {
+      reason += " Deine Form ist deutlich negativ, deshalb ist die Belastung vorsichtiger gewählt.";
     }
 
-    if (inTaper && dayType !== "Rest") {
-      reason += " Du befindest dich in einer Taperphase vor einem Event, daher ist die Belastung insgesamt leicht reduziert.";
+    if (inTaper) {
+      reason += " Du befindest dich in einer Taperphase vor einem Event, daher ist die Gesamtbelastung zusätzlich reduziert.";
     }
 
-    // 10) Wellness heute updaten
+    reason += ` Geplantes Tagesziel: ~${dailyTarget} TSS.`;
+
+    // 9) Wellness heute updaten
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: dailyTarget,
@@ -515,7 +457,7 @@ async function handle() {
       );
     }
 
-    // 11) Zukünftige Wochen planen
+    // 10) Zukünftige Wochen planen
     const WEEKS_TO_SIMULATE = 7;
     await simulatePlannedWeeks(
       ctlMon,
