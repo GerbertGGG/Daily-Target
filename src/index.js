@@ -278,6 +278,7 @@ async function handle() {
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl;
     const atl = wellness.atl;
+    const tsb = ctl - atl;
     const rampRate = wellness.rampRate ?? 0;
 
     if (ctl == null || atl == null) {
@@ -391,7 +392,20 @@ async function handle() {
     let dayType = "Solide";
     let dayEmoji = "🟡";
     let dailyAdj = 1.0;
-
+// 👉 NEU: TSB als zusätzlicher Faktor
+if (tsb >= 10 && dayType !== "Rest") {
+  // richtig frisch: Schlüssel-Tag leicht pushen
+  dayType = "Schlüssel";
+  dayEmoji = "🔴";
+  dailyAdj = Math.max(dailyAdj, 1.15);
+} else if (tsb <= -15) {
+  // ziemlich platt: lieber Rest/Locker
+  if (dayType === "Schlüssel" || dayType === "Solide") {
+    dayType = "Locker";
+    dayEmoji = "🟢";
+    dailyAdj = Math.min(dailyAdj, 0.8);
+  }
+}
     let goodRecovery = false;
     let badRecovery = false;
     let veryBadRecovery = false;
