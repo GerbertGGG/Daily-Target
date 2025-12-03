@@ -11,7 +11,7 @@ const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 // realistische Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
-// Taper-Konstanten (Variante C)
+// Taper-Konstanten
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
 const TAPER_DAILY_START = 0.8;
@@ -60,9 +60,7 @@ async function getNextEventDate(athleteId, authHeader, todayStr) {
   );
   if (candidates.length === 0) candidates = events;
 
-  let bestEvent = null;
   let bestDate = null;
-
   for (const ev of candidates) {
     const startLocal = ev.start_date_local || ev.startDateLocal || null;
     if (!startLocal) continue;
@@ -74,7 +72,6 @@ async function getNextEventDate(athleteId, authHeader, todayStr) {
 
     if (!bestDate || dDateOnly < bestDate) {
       bestDate = dDateOnly;
-      bestEvent = ev;
     }
   }
 
@@ -226,7 +223,6 @@ async function simulatePlannedWeeks(
         txt
       );
     } else if (resFuture.body) {
-      // Body explizit abbrechen, damit keine "stalled response" entsteht
       resFuture.body.cancel();
     }
 
@@ -317,7 +313,6 @@ async function handle() {
     // 3b) Wochenziel (ohne Rad-lastig-Schutz)
     let weeklyTarget;
     if (today === mondayStr) {
-      // Rohes Wochenziel basierend auf CTL/ATL und Wochenzustand
       weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
     } else if (mondayWeeklyTarget != null) {
       weeklyTarget = mondayWeeklyTarget;
@@ -398,7 +393,7 @@ async function handle() {
     }
 
     // Wie lange her ist das letzte Training (inkl. heute)?
-    let daysSinceLastTraining = daysSinceMonday + 1; // Default: diese Woche noch nichts
+    let daysSinceLastTraining = daysSinceMonday + 1;
     for (let offset = 0; offset <= daysSinceMonday; offset++) {
       const d = new Date(todayDate);
       d.setUTCDate(d.getUTCDate() - offset);
@@ -444,30 +439,28 @@ async function handle() {
     else if (tsb <= -10) tsbFactor = 0.6;
     else if (tsb <= -5) tsbFactor = 0.8;
 
-    // e) Mikrozyklus-Faktor: viele Ruhetage / viele Trainingstage
+    // e) Mikrozyklus-Faktor
     let microFactor = 1.0;
 
-    // 2+ Tage ohne Training → Schub nach oben (wenn Form nicht schlecht)
     if (daysSinceLastTraining >= 2 && tsb >= 0) {
-      microFactor *= 1.25; // +25%
+      microFactor *= 1.25;
     }
     if (daysSinceLastTraining >= 3 && tsb >= 0) {
-      microFactor *= 1.10; // zusätzlich +10% → insgesamt ~+37%
+      microFactor *= 1.10;
     }
 
-    // 3+ Tage hintereinander trainiert → dämpfen
     if (consecutiveTrainingDays >= 3) {
-      microFactor *= 0.8; // -20%
+      microFactor *= 0.8;
     }
     if (consecutiveTrainingDays >= 4) {
-      microFactor *= 0.7; // stärker runter
+      microFactor *= 0.7;
     }
 
-    // Rohes Tagesziel (Tages-TSS)
+    // Rohes Tagesziel (TSS)
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
 
     // f) Obergrenzen
-    const maxDailyByCtl = ctl * 3.0;             // CTL 20 → max 60
+    const maxDailyByCtl = ctl * 3.0;
     const maxDailyByWeek = targetFromWeek * 2.5;
     const maxDaily = Math.max(
       baseFromFitness,
@@ -475,9 +468,7 @@ async function handle() {
     );
 
     dailyTargetRaw = Math.max(0, dailyTargetRaw);
-    const dailyTarget = Math.round(
-      Math.min(dailyTargetRaw, maxDaily)
-    );
+    const dailyTarget = Math.round(Math.min(dailyTargetRaw, maxDaily));
 
     // Single-TSS-Target (kein Sportsplit)
     const tssTarget = dailyTarget;
@@ -490,40 +481,40 @@ async function handle() {
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Kommentartext vorbereiten
-    let commentText =
-      "Erklärung zum heutigen Trainingsziel:\n" +
-      "\n" +
-      `Wochenziel: ${weeklyTarget} TSS\n` +
-      `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
-      `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
-      "\n" +
-      "Aktuelle Fitness und Form:\n" +
-      `CTL: ${ctl.toFixed(1)}\n` +
-      `ATL: ${atl.toFixed(1)}\n` +
-      `TSB (Form): ${tsb.toFixed(1)}\n` +
-      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n" +
-      "\n" +
-      "Mikrozyklus dieser Woche:\n" +
-      `Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}\n` +
-      `Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}\n` +
-      "\n" +
-      "Rechenweg:\n" +
-      `targetFromWeek = ${weeklyTarget} / ${TRAINING_DAYS_PER_WEEK} = ${targetFromWeek.toFixed(1)}\n` +
-      `baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${baseFromFitness.toFixed(1)}\n` +
-      `combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}\n` +
-      `tsbFactor = ${tsbFactor}\n` +
-      `microFactor = ${microFactor.toFixed(2)}\n` +
-      `dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}\n` +
-      `maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
-      "\n" +
-      `Tagesziel: ${tssTarget} TSS\n` +
-      `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)\n`;
+    // 8) Kommentar als Template-String (kein +-Chaos)
+    const commentText = `Erklärung zum heutigen Trainingsziel:
 
-    // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
+Wochenziel: ${weeklyTarget} TSS
+Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}
+Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}
+
+Aktuelle Fitness und Form:
+CTL: ${ctl.toFixed(1)}
+ATL: ${atl.toFixed(1)}
+TSB (Form): ${tsb.toFixed(1)}
+Taperphase: ${inTaper ? "Ja" : "Nein"}
+
+Mikrozyklus dieser Woche:
+Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}
+Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}
+
+Rechenweg:
+targetFromWeek = ${weeklyTarget} / ${TRAINING_DAYS_PER_WEEK} = ${targetFromWeek.toFixed(1)}
+baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${baseFromFitness.toFixed(1)}
+combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}
+tsbFactor = ${tsbFactor}
+microFactor = ${microFactor.toFixed(2)}
+dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}
+maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}
+
+Tagesziel: ${tssTarget} TSS
+Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
+`;
+
+    // 9) Wellness heute updaten
     const payloadToday = {
       id: today,
-      [INTERVALS_TARGET_FIELD]: tssTarget, // Tagesziel = TSS
+      [INTERVALS_TARGET_FIELD]: tssTarget,
       [INTERVALS_PLAN_FIELD]: planTextToday,
       comments: commentText
       // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
@@ -552,7 +543,6 @@ async function handle() {
         { status: 500 }
       );
     } else if (updateRes.body) {
-      // Erfolgsfall: Body explizit abbrechen
       updateRes.body.cancel();
     }
 
