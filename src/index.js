@@ -428,6 +428,25 @@ if (today === mondayStr) {
     dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
 
     const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const daysSinceMonday = Math.round(
+  (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
+);
+
+// verbleibende Tage inkl. heute (mindestens 1, damit wir nie durch 0 teilen)
+const remainingDays = Math.max(1, 7 - daysSinceMonday);
+
+const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+const catchupPerDay = weeklyRemaining > 0 
+  ? weeklyRemaining / remainingDays 
+  : 0;
+
+// Hard-Cap nach oben, damit es nicht völlig eskaliert (z.B. max +50% über Plan)
+const rawDailyTarget = Math.max(planTarget, catchupPerDay);
+const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * 1.5);
+
+const dailyTarget = Math.round(cappedDailyTarget);
+    
 const catchupPerDay = weeklyRemaining > 0 
   ? weeklyRemaining / remainingDays 
   : 0;
