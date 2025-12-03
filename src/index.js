@@ -468,27 +468,32 @@ async function handle() {
 
     // 8) Kommentartext vorbereiten
         const commentText =
-      `Erklärung zum heutigen Trainingsziel:\n` +
-      `\n` +
-      `Wochenziel: ${weeklyTarget} TSS\n` +
-      `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
-      `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
-      `\n` +
-      `Aktuelle Fitness und Form:\n` +
-      `CTL: ${ctl.toFixed(1)}\n` +
-      `ATL: ${atl.toFixed(1)}\n` +
-      `TSB (Form): ${tsb.toFixed(1)}\n` +
-      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
-      `\n` +
-      `Mikrozyklus dieser Woche:\n` +
-      `Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}\n` +
-      `Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}\n` +
-      `\n` +
-      `Einschätzung:\n` +
-      `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form.\n` +
-      `Mehrere Ruhetage erlauben eine höhere Belastung, mehrere Trainingstage hintereinander führen zu einer vorsichtigeren Vorgabe.\n` +
-      `\n` +
-      `Geplantes Tagesziel heute: ~${dailyTarget} TSS.\n`;
+  `Erklärung zum heutigen Trainingsziel:\n` +
+  `\n` +
+  `Wochenziel: ${weeklyTarget} TSS\n` +
+  `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
+  `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
+  `\n` +
+  `Aktuelle Fitness und Form:\n` +
+  `CTL: ${ctl.toFixed(1)}\n` +
+  `ATL: ${atl.toFixed(1)}\n` +
+  `TSB (Form): ${tsb.toFixed(1)}\n` +
+  `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
+  `\n` +
+  `Mikrozyklus dieser Woche:\n` +
+  `Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}\n` +
+  `Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}\n` +
+  `\n` +
+  `Rechenweg:\n` +
+  `targetFromWeek = ${weeklyTarget} / ${TRAINING_DAYS_PER_WEEK} = ${targetFromWeek.toFixed(1)}\n` +
+  `baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${(baseFromFitness).toFixed(1)}\n` +
+  `combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${(baseFromFitness).toFixed(1)} = ${combinedBase.toFixed(1)}\n` +
+  `tsbFactor = ${tsbFactor}\n` +
+  `microFactor = ${microFactor.toFixed(2)}\n` +
+  `dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}\n` +
+  `maxDaily = min(CTL*3=${(ctl*3).toFixed(1)}, Week*2.5=${(targetFromWeek*2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
+  `\n` +
+  `Geplantes Tagesziel heute (gecapped): ${dailyTarget} TSS\n`;
 
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
