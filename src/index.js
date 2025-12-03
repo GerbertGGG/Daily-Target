@@ -1,6 +1,6 @@
 const BASE_URL = "https://intervals.icu/api/v1";
 
-// 🔥 Hardcoded Variablen – HIER deine Werte eintragen!
+
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 const INTERVALS_TARGET_FIELD = "TageszielTSS";
