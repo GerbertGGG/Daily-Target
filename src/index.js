@@ -292,30 +292,43 @@ async function handle() {
 
     // 2) Montag-Werte
     const mondayWellnessRes = await fetch(
-      `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
-      { headers: { Authorization: authHeader } }
-    );
+  `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
+  { headers: { Authorization: authHeader } }
+);
 
-    let ctlMon;
-    let atlMon;
+let ctlMon;
+let atlMon;
+let mondayWeeklyTarget = null;
 
-    if (mondayWellnessRes.ok) {
-      const mon = await mondayWellnessRes.json();
-      ctlMon = mon.ctl ?? ctl;
-      atlMon = mon.atl ?? atl;
-    } else {
-      ctlMon = ctl;
-      atlMon = atl;
-    }
+if (mondayWellnessRes.ok) {
+  const mon = await mondayWellnessRes.json();
+  ctlMon = mon.ctl ?? ctl;
+  atlMon = mon.atl ?? atl;
+  mondayWeeklyTarget = mon[WEEKLY_TARGET_FIELD] ?? null;
+} else {
+  ctlMon = ctl;
+  atlMon = atl;
+}
 
     // 3) Wochenzustand
     const { state: weekState } = classifyWeek(ctl, atl, rampRate);
 
     let factor = 7;
-    if (weekState === "Erholt") factor = 8;
-    if (weekState === "Müde") factor = 5.5;
+if (weekState === "Erholt") factor = 8;
+if (weekState === "Müde") factor = 5.5;
 
-    let weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+let weeklyTarget;
+
+// Nur am Montag neu berechnen
+if (today === mondayStr) {
+  weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+} else if (mondayWeeklyTarget != null) {
+  // unter der Woche das Montag-Wochenziel weiterverwenden
+  weeklyTarget = mondayWeeklyTarget;
+} else {
+  // Fallback: falls Montag noch leer ist
+  weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+}
 
     // 4) Event & dynamische Taperlänge
     let taperDailyFactor = 1.0;
@@ -414,20 +427,33 @@ async function handle() {
 
     dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
 
-    const dailyTarget = Math.round(dailyTargetBase * taperDailyFactor * dailyAdj);
+    const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+const catchupPerDay = weeklyRemaining > 0 
+  ? weeklyRemaining / remainingDays 
+  : 0;
+
+// Hard-Cap nach oben, damit es nicht völlig eskaliert (z.B. max +50% über Plan)
+const rawDailyTarget = Math.max(planTarget, catchupPerDay);
+const cappedDailyTarget = Math.min(rawDailyTarget, planTarget * 1.5);
+
+const dailyTarget = Math.round(cappedDailyTarget);
 
     // 7) WochenPlan
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
     // 8) Wellness HEUTE updaten
-    const payloadToday = {
-      id: today,
-      [INTERVALS_TARGET_FIELD]: dailyTarget,
-      [INTERVALS_PLAN_FIELD]: planTextToday,
-      [WEEKLY_TARGET_FIELD]: weeklyTarget,
-      [DAILY_TYPE_FIELD]: `${dayEmoji} ${dayType}`
-    };
+   const payloadToday = {
+  id: today,
+  [INTERVALS_TARGET_FIELD]: dailyTarget,
+  [INTERVALS_PLAN_FIELD]: planTextToday,
+  [DAILY_TYPE_FIELD]: `${dayEmoji} ${dayType}`
+};
+
+// WochenzielTSS nur am Montag schreiben
+if (today === mondayStr) {
+  payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
+}
 
     const updateRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
