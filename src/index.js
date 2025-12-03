@@ -317,81 +317,11 @@ async function handle() {
     if (weekState === "Erholt") factor = 8;
     if (weekState === "Müde") factor = 5.5;
 
-    // 3b) Wochenziel inkl. Level-A-Schutz bei Rad-lastiger Vorwoche
+    // 3b) Wochenziel (ohne Rad-lastig-Schutz)
     let weeklyTarget;
-    let lastWeekTotalTss = null;
-    let lastWeekRideTss = 0;
-    let lastWeekRunTss = 0;
-    let weeklyCappedByRad = false;
-
     if (today === mondayStr) {
       // Rohes Wochenziel basierend auf CTL/ATL und Wochenzustand
       weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
-
-      // Level A Schutz: Wenn Vorwoche extrem Rad-lastig war, Wochenziel nur moderat erhöhen
-      try {
-        // Datumsbereich der Vorwoche (Montag bis Sonntag)
-        const lastMondayDate = new Date(mondayDate);
-        lastMondayDate.setUTCDate(lastMondayDate.getUTCDate() - 7);
-        const lastSundayDate = new Date(mondayDate);
-        lastSundayDate.setUTCDate(lastSundayDate.getUTCDate() - 1);
-
-        const lastMondayStr = lastMondayDate.toISOString().slice(0, 10);
-        const lastSundayStr = lastSundayDate.toISOString().slice(0, 10);
-
-        // Aktivitäten der Vorwoche holen
-        const actRes = await fetch(
-          `${BASE_URL}/athlete/${athleteId}/activities?oldest=${lastMondayStr}&newest=${lastSundayStr}&fields=sport,tss`,
-          { headers: { Authorization: authHeader } }
-        );
-
-        if (actRes.ok) {
-          const acts = await actRes.json();
-          let total = 0;
-          let ride = 0;
-          let run = 0;
-
-          for (const a of acts) {
-            const tssVal = a.tss ?? 0;
-            total += tssVal;
-            const sport = (a.sport || "").toLowerCase();
-            if (sport.includes("ride")) {
-              ride += tssVal;
-            } else if (sport.includes("run")) {
-              run += tssVal;
-            }
-          }
-
-          lastWeekTotalTss = total;
-          lastWeekRideTss = ride;
-          lastWeekRunTss = run;
-
-          if (total > 0 && ride / total >= 0.7) {
-            // Vorwoche war Rad-dominiert → Erhöhung deckeln
-            let prevWeeklyTarget = null;
-            const prevMonWellRes = await fetch(
-              `${BASE_URL}/athlete/${athleteId}/wellness/${lastMondayStr}`,
-              { headers: { Authorization: authHeader } }
-            );
-            if (prevMonWellRes.ok) {
-              const prevMonWell = await prevMonWellRes.json();
-              prevWeeklyTarget = prevMonWell[WEEKLY_TARGET_FIELD] ?? null;
-            }
-
-            if (prevWeeklyTarget != null) {
-              const allowedMax = Math.round(prevWeeklyTarget * 1.07); // max +7%
-              if (weeklyTarget > allowedMax) {
-                weeklyTarget = allowedMax;
-                weeklyCappedByRad = true;
-              }
-            }
-          }
-        } else if (actRes.body) {
-          actRes.body.cancel();
-        }
-      } catch (e) {
-        console.error("Error in weekly Rad protection logic:", e);
-      }
     } else if (mondayWeeklyTarget != null) {
       weeklyTarget = mondayWeeklyTarget;
     } else {
@@ -556,6 +486,10 @@ async function handle() {
     const runTarget = dailyTarget; // Lauf ist Referenz
     const bikeTarget = Math.round(runTarget * RUN_FACTOR);
 
+    // TSS-Range (z.B. 80–120% des Lauf-Tagesziels)
+    const tssLow = Math.round(runTarget * 0.8);
+    const tssHigh = Math.round(runTarget * 1.2);
+
     // 7) WochenPlan
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
@@ -588,29 +522,11 @@ async function handle() {
       `maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
       "\n" +
       `Geplantes Tagesziel heute (interpretiert als Lauf-TSS, gecapped): ${runTarget} TSS\n` +
+      `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (ca. 80–120% des Ziels)\n` +
       "\n" +
-      "Sportartspezifisches Tagesziel:\n" +
+      "Sportartspezifisches Tagesziel (HF/TRIMP-basiert, daher gut vergleichbar):\n" +
       `Laufen: ${runTarget} TSS\n` +
       `Rad:    ${bikeTarget} TSS (Rad ist orthopädisch weniger belastend, daher höheres TSS-Ziel bei gleicher empfundenen Belastung)\n`;
-
-    // Montag: Erklärung zur Vorwoche und eventuellem Rad-Schutz
-    if (today === mondayStr && lastWeekTotalTss != null) {
-      const rideFrac = lastWeekTotalTss > 0 ? (lastWeekRideTss / lastWeekTotalTss) : 0;
-      commentText +=
-        "\n" +
-        "Wochenrückblick letzte Woche:\n" +
-        `Gesamt-TSS letzte Woche: ${lastWeekTotalTss.toFixed(0)}\n` +
-        `Davon Rad-TSS: ${lastWeekRideTss.toFixed(0)} (${(rideFrac * 100).toFixed(0)}%)\n` +
-        `Davon Lauf-TSS: ${lastWeekRunTss.toFixed(0)}\n`;
-
-      if (weeklyCappedByRad) {
-        commentText +=
-          "Da der Großteil der Belastung über Rad kam, wurde die Erhöhung des Wochenziels auf maximal +7% gegenüber der Vorwoche begrenzt, um eine zu harte Laufwoche zu vermeiden.\n";
-      } else {
-        commentText +=
-          "Die Verteilung der Sportarten war ausreichend ausgewogen, daher wurde das Wochenziel normal gemäß deiner Form und deinem Verlauf angepasst.\n";
-      }
-    }
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
@@ -664,7 +580,7 @@ async function handle() {
     );
 
     return new Response(
-      `OK: Tagesziel(Lauf)=${runTarget}, Rad-Empfehlung=${bikeTarget}, Wochenziel=${weeklyTarget}`,
+      `OK: Tagesziel(Lauf)=${runTarget}, Rad-Empfehlung=${bikeTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}`,
       { status: 200 }
     );
   } catch (err) {
