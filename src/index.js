@@ -6,10 +6,10 @@ const INTERVALS_ATHLETE_ID = "i105857";
 const INTERVALS_TARGET_FIELD = "TageszielTSS";
 const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
-const DAILY_TYPE_FIELD = "TagesTyp"; // wird nicht mehr beschrieben, bleibt aber vorhanden
+const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 
 // realistische Anzahl Trainingstage pro Woche
-const TRAINING_DAYS_PER_WEEK = 4.0; // eher 4 starke Tage → pro Tag mehr TSS
+const TRAINING_DAYS_PER_WEEK = 4.0;
 
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
@@ -366,7 +366,7 @@ async function handle() {
     }
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
-    // 6) Tagesziel – nur aus Woche, Fitness, Form, Taper
+    // 6) Tagesziel – aus Woche, Fitness, Form, Taper
 
     // a) Wochen-Sicht: TSS pro Trainingstag
     const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
@@ -388,9 +388,9 @@ async function handle() {
 
     let dailyTargetRaw = combinedBase * tsbFactor;
 
-    // e) Obergrenzen: 50–60 TSS an guten Tagen okay, aber begrenzt
+    // e) Obergrenzen
     const maxDailyByCtl = ctl * 3.0;             // CTL 20 → max 60
-    const maxDailyByWeek = targetFromWeek * 2.5; // z.B. 35*2.5 = 87, aber durch CTL gedeckelt
+    const maxDailyByWeek = targetFromWeek * 2.5;
     const maxDaily = Math.max(
       baseFromFitness,
       Math.min(maxDailyByCtl, maxDailyByWeek)
@@ -405,19 +405,38 @@ async function handle() {
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Wellness heute updaten (ohne TagesTyp)
+    // 8) Kommentartext vorbereiten (WICHTIG: vor payloadToday!)
+    const commentText =
+      `Erklärung zum heutigen Trainingsziel:\n` +
+      `\n` +
+      `Wochenziel: ${weeklyTarget} TSS\n` +
+      `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
+      `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
+      `\n` +
+      `Aktuelle Fitness und Form:\n` +
+      `CTL: ${ctl.toFixed(1)}\n` +
+      `ATL: ${atl.toFixed(1)}\n` +
+      `TSB (Form): ${tsb.toFixed(1)}\n` +
+      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
+      `\n` +
+      `Einschätzung:\n` +
+      `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form.\n` +
+      `Je höher deine Form (TSB) und je höher dein CTL, desto höher fällt das Tagesziel aus.\n` +
+      `\n` +
+      `Geplantes Tagesziel heute: ~${dailyTarget} TSS.\n`;
+
+    // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
-  id: today,
-  [INTERVALS_TARGET_FIELD]: dailyTarget,
-  [INTERVALS_PLAN_FIELD]: planTextToday,
-  comments: commentText   // 👈 hier kommt die Erklärung rein
-  // DAILY_TYPE_FIELD lassen wir absichtlich weg
-};
+      id: today,
+      [INTERVALS_TARGET_FIELD]: dailyTarget,
+      [INTERVALS_PLAN_FIELD]: planTextToday,
+      comments: commentText
+      // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
+    };
 
-if (today === mondayStr) {
-  payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
-}
-
+    if (today === mondayStr) {
+      payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
+    }
 
     const updateRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
@@ -437,27 +456,6 @@ if (today === mondayStr) {
         { status: 500 }
       );
     }
-
-    // 9) Day Notes (Tageskommentar) schreiben – nur Text
-   const commentText =
-  `Erklärung zum heutigen Trainingsziel:\n` +
-  `\n` +
-  `Wochenziel: ${weeklyTarget} TSS\n` +
-  `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
-  `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
-  `\n` +
-  `Aktuelle Fitness und Form:\n` +
-  `CTL: ${ctl.toFixed(1)}\n` +
-  `ATL: ${atl.toFixed(1)}\n` +
-  `TSB (Form): ${tsb.toFixed(1)}\n` +
-  `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
-  `\n` +
-  `Einschätzung:\n` +
-  `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form.\n` +
-  `Je höher deine Form (TSB) und je höher dein CTL, desto höher fällt das Tagesziel aus.\n` +
-  `\n` +
-  `Geplantes Tagesziel heute: ~${dailyTarget} TSS.\n`;
-
 
     // 10) Zukünftige Wochen planen
     const WEEKS_TO_SIMULATE = 7;
@@ -498,4 +496,3 @@ export default {
     ctx.waitUntil(handle());
   }
 };
-
