@@ -406,25 +406,30 @@ async function handle() {
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
     // 8) Erklärungstext (ohne „Solide/Locker/Schlüssel“)
-    let reason = `Heutiges Tagesziel basiert auf deinem Wochenziel (${weeklyTarget} TSS bei ca. ${TRAINING_DAYS_PER_WEEK} Trainingstagen ≈ ${targetFromWeek.toFixed(
-      1
-    )} TSS/Tag), deiner aktuellen Fitness (CTL=${ctl.toFixed(
-      1
-    )}) und deiner Form (TSB=${tsb.toFixed(1)}).`;
+   let reasonInner = `Heutiges Tagesziel basiert auf deinem Wochenziel (${weeklyTarget} TSS bei ca. ${TRAINING_DAYS_PER_WEEK} Trainingstagen ≈ ${targetFromWeek.toFixed(1)} TSS/Tag), deiner aktuellen Fitness (CTL=${ctl.toFixed(1)}), deiner Ermüdung (ATL=${atl.toFixed(1)}) und deiner Form (TSB=${tsb.toFixed(1)}).`;
 
-    if (tsb >= 5) {
-      reason += " Deine Form ist klar positiv, daher trauen wir dir heute eine etwas höhere Belastung zu.";
-    } else if (tsb >= 0) {
-      reason += " Deine Form ist leicht positiv, daher ist die Belastung moderat bis leicht erhöht.";
-    } else if (tsb <= -10) {
-      reason += " Deine Form ist deutlich negativ, deshalb ist die Belastung vorsichtiger gewählt.";
-    }
+if (tsb >= 5) {
+  reasonInner += " Deine Form ist klar positiv, daher trauen wir dir heute eine höhere Belastung zu.";
+} else if (tsb >= 0) {
+  reasonInner += " Deine Form ist leicht positiv, daher ist die Belastung moderat erhöht.";
+} else if (tsb <= -10) {
+  reasonInner += " Deine Form ist deutlich negativ, deshalb ist die Belastung vorsichtiger gewählt.";
+}
 
-    if (inTaper) {
-      reason += " Du befindest dich in einer Taperphase vor einem Event, daher ist die Gesamtbelastung zusätzlich reduziert.";
-    }
+if (inTaper) {
+  reasonInner += " Du befindest dich in einer Taperphase vor einem Event, daher ist die Belastung zusätzlich reduziert.";
+}
 
-    reason += ` Geplantes Tagesziel: ~${dailyTarget} TSS.`;
+reasonInner += ` Geplantes Tagesziel: ~${dailyTarget} TSS.`;
+
+// 👉 jetzt als Markdown-Klappbox formatieren
+const reason = `<details>
+  <summary>ℹ️ Erklärung anzeigen</summary>
+
+  ${reasonInner}
+
+</details>`;
+
 
     // 9) Wellness heute updaten
     const payloadToday = {
