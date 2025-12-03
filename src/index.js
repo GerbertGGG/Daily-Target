@@ -6,7 +6,7 @@ const INTERVALS_ATHLETE_ID = "i105857";
 const INTERVALS_TARGET_FIELD = "TageszielTSS";
 const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
-const DAILY_TYPE_FIELD = "TagesTyp";
+const DAILY_TYPE_FIELD = "TagesTyp"; // wird nicht mehr beschrieben, bleibt aber vorhanden
 
 // realistische Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0; // eher 4 starke Tage → pro Tag mehr TSS
@@ -374,7 +374,7 @@ async function handle() {
     // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
     const baseFromFitness = dailyTargetBase * taperDailyFactor;
 
-    // c) Kombination: eher Wochenziel-Driven
+    // c) Kombination: eher Wochenziel-getrieben
     const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
     // d) Form-Faktor (TSB)
@@ -405,38 +405,12 @@ async function handle() {
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Erklärungstext (ohne „Solide/Locker/Schlüssel“)
-   let reasonInner = `Heutiges Tagesziel basiert auf deinem Wochenziel (${weeklyTarget} TSS bei ca. ${TRAINING_DAYS_PER_WEEK} Trainingstagen ≈ ${targetFromWeek.toFixed(1)} TSS/Tag), deiner aktuellen Fitness (CTL=${ctl.toFixed(1)}), deiner Ermüdung (ATL=${atl.toFixed(1)}) und deiner Form (TSB=${tsb.toFixed(1)}).`;
-
-if (tsb >= 5) {
-  reasonInner += " Deine Form ist klar positiv, daher trauen wir dir heute eine höhere Belastung zu.";
-} else if (tsb >= 0) {
-  reasonInner += " Deine Form ist leicht positiv, daher ist die Belastung moderat erhöht.";
-} else if (tsb <= -10) {
-  reasonInner += " Deine Form ist deutlich negativ, deshalb ist die Belastung vorsichtiger gewählt.";
-}
-
-if (inTaper) {
-  reasonInner += " Du befindest dich in einer Taperphase vor einem Event, daher ist die Belastung zusätzlich reduziert.";
-}
-
-reasonInner += ` Geplantes Tagesziel: ~${dailyTarget} TSS.`;
-
-// 👉 jetzt als Markdown-Klappbox formatieren
-const reason = `<details>
-  <summary>ℹ️ Erklärung anzeigen</summary>
-
-  ${reasonInner}
-
-</details>`;
-
-
-    // 9) Wellness heute updaten
+    // 8) Wellness heute updaten (ohne TagesTyp)
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: dailyTarget,
-      [INTERVALS_PLAN_FIELD]: planTextToday,
-      [DAILY_TYPE_FIELD]: reason
+      [INTERVALS_PLAN_FIELD]: planTextToday
+      // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
     };
 
     if (today === mondayStr) {
@@ -461,6 +435,38 @@ const reason = `<details>
         { status: 500 }
       );
     }
+
+    // 9) Day Notes (Tageskommentar) schreiben – nur Text
+    const notesText =
+      `Erklärung zum heutigen Trainingsziel:\n` +
+      `\n` +
+      `Wochenziel: ${weeklyTarget} TSS\n` +
+      `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
+      `Schätzung TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
+      `\n` +
+      `Aktuelle Fitness und Form:\n` +
+      `CTL: ${ctl.toFixed(1)}\n` +
+      `ATL: ${atl.toFixed(1)}\n` +
+      `TSB (Form): ${tsb.toFixed(1)}\n` +
+      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
+      `\n` +
+      `Einschätzung:\n` +
+      `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form. ` +
+      `Je höher deine Form (TSB) und je fitter du wirst (höherer CTL), desto höher fällt dieses Tagesziel aus.\n` +
+      `\n` +
+      `Geplantes Tagesziel: ~${dailyTarget} TSS.\n`;
+
+    await fetch(
+      `${BASE_URL}/athlete/${athleteId}/day-notes/${today}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader
+        },
+        body: JSON.stringify({ notes: notesText })
+      }
+    );
 
     // 10) Zukünftige Wochen planen
     const WEEKS_TO_SIMULATE = 7;
