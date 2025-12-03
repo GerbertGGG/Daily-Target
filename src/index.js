@@ -10,17 +10,6 @@ const DAILY_TYPE_FIELD = "TagesTyp";// numerisches Feld für Wochenziel
 
 
 
-// Taper-Einstellungen
-const TAPER_MIN_DAYS = 3;
-const TAPER_MAX_DAYS = 21;
-// Taper-Form über die letzten taperDays vor dem Event (für Tagesload)
-const TAPER_DAILY_START = 0.8;  // am Start des Tapers
-const TAPER_DAILY_END = 0.3;    // am Event-Vortag
-
-// ---------------------------------------------------------
-// HELFERFUNKTIONEN
-// ---------------------------------------------------------
-
 function computeDailyTarget(ctl, atl) {
   const base = 1.0;
   const k = 0.05;
@@ -48,7 +37,7 @@ function stateEmoji(state) {
   return "⚖️";
 }
 
-// Nächstes Event (Rennen/Ziel) aus Intervals holen
+// Nächstes Event (RACE/TARGET oder erstes Event) holen
 async function getNextEventDate(athleteId, authHeader, todayStr) {
   const todayDate = new Date(todayStr + "T00:00:00Z");
   const futureDate = new Date(todayDate);
@@ -247,242 +236,256 @@ async function simulatePlannedWeeks(
 }
 
 // ---------------------------------------------------------
-// WORKER-HANDLER
+// HAUPTLOGIK – wird von fetch UND scheduled benutzt
+// ---------------------------------------------------------
+
+async function handle() {
+  const apiKey = INTERVALS_API_KEY;
+  const athleteId = INTERVALS_ATHLETE_ID;
+
+  if (!apiKey || !athleteId) {
+    return new Response("Missing config", { status: 500 });
+  }
+
+  const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
+
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const todayDate = new Date(today + "T00:00:00Z");
+
+  const weekday = todayDate.getUTCDay(); // 0=So,1=Mo,...
+  const offset = weekday === 0 ? 6 : weekday - 1;
+  const mondayDate = new Date(todayDate);
+  mondayDate.setUTCDate(mondayDate.getUTCDate() - offset);
+  const mondayStr = mondayDate.toISOString().slice(0, 10);
+
+  try {
+    // 1) Wellness heute
+    const wellnessRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
+      { headers: { Authorization: authHeader } }
+    );
+
+    if (!wellnessRes.ok) {
+      const text = await wellnessRes.text();
+      return new Response(
+        `Failed to fetch wellness today: ${wellnessRes.status} ${text}`,
+        { status: 500 }
+      );
+    }
+
+    const wellness = await wellnessRes.json();
+    const ctl = wellness.ctl;
+    const atl = wellness.atl;
+    const rampRate = wellness.rampRate ?? 0;
+
+    if (ctl == null || atl == null) {
+      return new Response("No ctl/atl data", { status: 200 });
+    }
+
+    const dailyTargetBase = computeDailyTarget(ctl, atl);
+
+    const sleepSecs = wellness.sleepSecs ?? null;
+    const sleepScore = wellness.sleepScore ?? null;
+    const hrv = wellness.hrv ?? null;
+    const sleepHours = sleepSecs != null ? sleepSecs / 3600 : null;
+
+    // 2) Montag-Werte
+    const mondayWellnessRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
+      { headers: { Authorization: authHeader } }
+    );
+
+    let ctlMon;
+    let atlMon;
+
+    if (mondayWellnessRes.ok) {
+      const mon = await mondayWellnessRes.json();
+      ctlMon = mon.ctl ?? ctl;
+      atlMon = mon.atl ?? atl;
+    } else {
+      ctlMon = ctl;
+      atlMon = atl;
+    }
+
+    // 3) Wochenzustand
+    const { state: weekState } = classifyWeek(ctl, atl, rampRate);
+
+    let factor = 7;
+    if (weekState === "Erholt") factor = 8;
+    if (weekState === "Müde") factor = 5.5;
+
+    let weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+
+    // 4) Event & dynamische Taperlänge
+    let taperDailyFactor = 1.0;
+    let taperWeeklyFactor = 1.0;
+
+    try {
+      const evt = await getNextEventDate(athleteId, authHeader, today);
+      if (evt && evt.daysToEvent > 0) {
+        const normalLoad = ctl; // Variante C: ~Durchschnitts-TSS der letzten 42 Tage
+        const taperDays = computeTaperDays(ctl, atl, normalLoad, evt.daysToEvent);
+
+        if (taperDays > 0 && evt.daysToEvent <= taperDays) {
+          const taperStartIndex = evt.daysToEvent - taperDays;
+          const dayIndex = 0; // heute
+
+          let progress = 0;
+          if (taperDays <= 1) {
+            progress = 1;
+          } else {
+            const pos = dayIndex - taperStartIndex;
+            progress = Math.max(0, Math.min(1, pos / (taperDays - 1)));
+          }
+
+          taperDailyFactor =
+            TAPER_DAILY_START +
+            (TAPER_DAILY_END - TAPER_DAILY_START) * progress;
+
+          const TAPER_WEEKLY_START = 0.9;
+          const TAPER_WEEKLY_END = 0.6;
+          taperWeeklyFactor =
+            TAPER_WEEKLY_START +
+            (TAPER_WEEKLY_END - TAPER_WEEKLY_START) * progress;
+        }
+      }
+    } catch (e) {
+      // Wenn Event-API scheitert, einfach ohne Taper weiter
+      console.error("Error in event/taper logic:", e);
+    }
+
+    weeklyTarget = Math.round(weeklyTarget * taperWeeklyFactor);
+
+    // 5) Wochenload summieren
+    let weekLoad = 0;
+    const weekRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
+      { headers: { Authorization: authHeader } }
+    );
+
+    if (weekRes.ok) {
+      const weekArr = await weekRes.json();
+      for (const day of weekArr) {
+        if (day.ctlLoad != null) weekLoad += day.ctlLoad;
+      }
+    }
+
+    const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
+
+    // 6) TagesTyp + Schlaf/HRV-Adjust
+    let dayType = "Solide";
+    let dayEmoji = "🟡";
+    let dailyAdj = 1.0;
+
+    let goodRecovery = false;
+    let badRecovery = false;
+    let veryBadRecovery = false;
+
+    if (sleepScore != null && sleepScore >= 75) goodRecovery = true;
+    if (sleepScore != null && sleepScore <= 60) badRecovery = true;
+    if (sleepScore != null && sleepScore <= 50) veryBadRecovery = true;
+
+    if (sleepHours != null && sleepHours >= 8) goodRecovery = true;
+    if (sleepHours != null && sleepHours <= 6) badRecovery = true;
+    if (sleepHours != null && sleepHours <= 5.5) veryBadRecovery = true;
+
+    if (hrv != null && hrv >= 42) goodRecovery = true;
+    if (hrv != null && hrv <= 35) badRecovery = true;
+    if (hrv != null && hrv <= 30) veryBadRecovery = true;
+
+    if (weekState === "Müde" || veryBadRecovery) {
+      dayType = "Rest";
+      dayEmoji = "⚪";
+      dailyAdj = 0.4;
+    } else if (goodRecovery && weekState === "Erholt") {
+      dayType = "Schlüssel";
+      dayEmoji = "🔴";
+      dailyAdj = 1.1;
+    } else if (badRecovery) {
+      dayType = "Locker";
+      dayEmoji = "🟢";
+      dailyAdj = 0.8;
+    } else {
+      dayType = "Solide";
+      dayEmoji = "🟡";
+      dailyAdj = 1.0;
+    }
+
+    dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
+
+    const dailyTarget = Math.round(dailyTargetBase * taperDailyFactor * dailyAdj);
+
+    // 7) WochenPlan
+    const emojiToday = stateEmoji(weekState);
+    const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
+
+    // 8) Wellness HEUTE updaten
+    const payloadToday = {
+      id: today,
+      [INTERVALS_TARGET_FIELD]: dailyTarget,
+      [INTERVALS_PLAN_FIELD]: planTextToday,
+      [WEEKLY_TARGET_FIELD]: weeklyTarget,
+      [DAILY_TYPE_FIELD]: `${dayEmoji} ${dayType}`
+    };
+
+    const updateRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader
+        },
+        body: JSON.stringify(payloadToday)
+      }
+    );
+
+    if (!updateRes.ok) {
+      const text = await updateRes.text();
+      return new Response(
+        `Failed to update wellness: ${updateRes.status} ${text}`,
+        { status: 500 }
+      );
+    }
+
+    // 9) Zukünftige Wochen planen (aktuelle + 6 weitere Montage)
+    const WEEKS_TO_SIMULATE = 7;
+    await simulatePlannedWeeks(
+      ctlMon,
+      atlMon,
+      weekState,
+      weeklyTarget,
+      mondayDate,
+      WEEKS_TO_SIMULATE,
+      authHeader,
+      athleteId,
+      INTERVALS_PLAN_FIELD,
+      WEEKLY_TARGET_FIELD
+    );
+
+    return new Response(
+      `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}`,
+      { status: 200 }
+    );
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return new Response("Unexpected error: " + err.toString(), {
+      status: 500
+    });
+  }
+}
+
+// ---------------------------------------------------------
+// EXPORT: HTTP + CRON
 // ---------------------------------------------------------
 
 export default {
-  async fetch(request) {
-    const apiKey = INTERVALS_API_KEY;
-    const athleteId = INTERVALS_ATHLETE_ID;
-
-    if (!apiKey || !athleteId) {
-      return new Response("Missing config", { status: 500 });
-    }
-
-    const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
-
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const todayDate = new Date(today + "T00:00:00Z");
-
-    const weekday = todayDate.getUTCDay(); // 0=So,1=Mo,...
-    const offset = weekday === 0 ? 6 : weekday - 1;
-    const mondayDate = new Date(todayDate);
-    mondayDate.setUTCDate(mondayDate.getUTCDate() - offset);
-    const mondayStr = mondayDate.toISOString().slice(0, 10);
-
-    try {
-      // 1) Wellness heute
-      const wellnessRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
-        { headers: { Authorization: authHeader } }
-      );
-
-      if (!wellnessRes.ok) {
-        const text = await wellnessRes.text();
-        return new Response(
-          `Failed to fetch wellness today: ${wellnessRes.status} ${text}`,
-          { status: 500 }
-        );
-      }
-
-      const wellness = await wellnessRes.json();
-      const ctl = wellness.ctl;
-      const atl = wellness.atl;
-      const rampRate = wellness.rampRate ?? 0;
-
-      if (ctl == null || atl == null) {
-        return new Response("No ctl/atl data", { status: 200 });
-      }
-
-      const dailyTargetBase = computeDailyTarget(ctl, atl);
-
-      const sleepSecs = wellness.sleepSecs ?? null;
-      const sleepScore = wellness.sleepScore ?? null;
-      const hrv = wellness.hrv ?? null;
-      const sleepHours = sleepSecs != null ? sleepSecs / 3600 : null;
-
-      // 2) Montag-Werte
-      const mondayWellnessRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
-        { headers: { Authorization: authHeader } }
-      );
-
-      let ctlMon;
-      let atlMon;
-
-      if (mondayWellnessRes.ok) {
-        const mon = await mondayWellnessRes.json();
-        ctlMon = mon.ctl ?? ctl;
-        atlMon = mon.atl ?? atl;
-      } else {
-        ctlMon = ctl;
-        atlMon = atl;
-      }
-
-      // 3) Wochenzustand
-      const { state: weekState } = classifyWeek(ctl, atl, rampRate);
-
-      let factor = 7;
-      if (weekState === "Erholt") factor = 8;
-      if (weekState === "Müde") factor = 5.5;
-
-      let weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
-
-      // 4) Event & dynamische Taperlänge
-      let taperDailyFactor = 1.0;
-      let taperWeeklyFactor = 1.0;
-
-      try {
-        const evt = await getNextEventDate(athleteId, authHeader, today);
-        if (evt && evt.daysToEvent > 0) {
-          const normalLoad = ctl; // Variante C: ~Durchschnitts-TSS der letzten 42 Tage
-          const taperDays = computeTaperDays(ctl, atl, normalLoad, evt.daysToEvent);
-
-          if (taperDays > 0 && evt.daysToEvent <= taperDays) {
-            const taperStartIndex = evt.daysToEvent - taperDays;
-            const dayIndex = 0; // heute in der Simulation
-
-            let progress = 0;
-            if (taperDays <= 1) {
-              progress = 1;
-            } else {
-              const pos = dayIndex - taperStartIndex;
-              progress = Math.max(0, Math.min(1, pos / (taperDays - 1)));
-            }
-
-            taperDailyFactor =
-              TAPER_DAILY_START +
-              (TAPER_DAILY_END - TAPER_DAILY_START) * progress;
-
-            const TAPER_WEEKLY_START = 0.9;
-            const TAPER_WEEKLY_END = 0.6;
-            taperWeeklyFactor =
-              TAPER_WEEKLY_START +
-              (TAPER_WEEKLY_END - TAPER_WEEKLY_START) * progress;
-          }
-        }
-      } catch (e) {
-        // wenn Events nicht ladbar, einfach ohne Taper weiter
-      }
-
-      weeklyTarget = Math.round(weeklyTarget * taperWeeklyFactor);
-
-      // 5) Wochenload summieren
-      let weekLoad = 0;
-      const weekRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
-        { headers: { Authorization: authHeader } }
-      );
-
-      if (weekRes.ok) {
-        const weekArr = await weekRes.json();
-        for (const day of weekArr) {
-          if (day.ctlLoad != null) weekLoad += day.ctlLoad;
-        }
-      }
-
-      const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
-
-      // 6) TagesTyp + Schlaf/HRV-Adjust
-      let dayType = "Solide";
-      let dayEmoji = "🟡";
-      let dailyAdj = 1.0;
-
-      let goodRecovery = false;
-      let badRecovery = false;
-      let veryBadRecovery = false;
-
-      if (sleepScore != null && sleepScore >= 75) goodRecovery = true;
-      if (sleepScore != null && sleepScore <= 60) badRecovery = true;
-      if (sleepScore != null && sleepScore <= 50) veryBadRecovery = true;
-
-      if (sleepHours != null && sleepHours >= 8) goodRecovery = true;
-      if (sleepHours != null && sleepHours <= 6) badRecovery = true;
-      if (sleepHours != null && sleepHours <= 5.5) veryBadRecovery = true;
-
-      if (hrv != null && hrv >= 42) goodRecovery = true;
-      if (hrv != null && hrv <= 35) badRecovery = true;
-      if (hrv != null && hrv <= 30) veryBadRecovery = true;
-
-      if (weekState === "Müde" || veryBadRecovery) {
-        dayType = "Rest";
-        dayEmoji = "⚪";
-        dailyAdj = 0.4;
-      } else if (goodRecovery && weekState === "Erholt") {
-        dayType = "Schlüssel";
-        dayEmoji = "🔴";
-        dailyAdj = 1.1;
-      } else if (badRecovery) {
-        dayType = "Locker";
-        dayEmoji = "🟢";
-        dailyAdj = 0.8;
-      } else {
-        dayType = "Solide";
-        dayEmoji = "🟡";
-        dailyAdj = 1.0;
-      }
-
-      dailyAdj = Math.max(0.4, Math.min(1.2, dailyAdj));
-
-      const dailyTarget = Math.round(dailyTargetBase * taperDailyFactor * dailyAdj);
-
-      // 7) WochenPlan
-      const emojiToday = stateEmoji(weekState);
-      const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
-
-      // 8) Wellness HEUTE updaten
-      const payloadToday = {
-        id: today,
-        [INTERVALS_TARGET_FIELD]: dailyTarget,
-        [INTERVALS_PLAN_FIELD]: planTextToday,
-        [WEEKLY_TARGET_FIELD]: weeklyTarget,
-        [DAILY_TYPE_FIELD]: `${dayEmoji} ${dayType}`
-      };
-
-      const updateRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payloadToday)
-        }
-      );
-
-      if (!updateRes.ok) {
-        const text = await updateRes.text();
-        return new Response(
-          `Failed to update wellness: ${updateRes.status} ${text}`,
-          { status: 500 }
-        );
-      }
-
-      // 9) Zukünftige Wochen planen (aktuelle + 6 weitere Montage)
-      const WEEKS_TO_SIMULATE = 7;
-      await simulatePlannedWeeks(
-        ctlMon,
-        atlMon,
-        weekState,
-        weeklyTarget,
-        mondayDate,
-        WEEKS_TO_SIMULATE,
-        authHeader,
-        athleteId,
-        INTERVALS_PLAN_FIELD,
-        WEEKLY_TARGET_FIELD
-      );
-
-      return new Response(
-        `OK: Tagesziel=${dailyTarget}, Wochenziel=${weeklyTarget}`,
-        { status: 200 }
-      );
-    } catch (err) {
-      return new Response("Unexpected error: " + err.toString(), {
-        status: 500
-      });
-    }
+  async fetch(request, env, ctx) {
+    return handle();
+  },
+  async scheduled(event, env, ctx) {
+    // Cron-Trigger ruft dieselbe Logik auf
+    ctx.waitUntil(handle());
   }
 };
