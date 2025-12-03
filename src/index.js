@@ -522,8 +522,8 @@ async function handle() {
       `maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
       "\n" +
       `Geplantes Tagesziel heute (interpretiert als Lauf-TSS, gecapped): ${runTarget} TSS\n` +
-      `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (ca. 80–120% des Ziels) \n` +
-      "
+      `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (ca. 80–120% des Ziels) \n` +;
+      
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
