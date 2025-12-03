@@ -11,9 +11,6 @@ const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 // realistische Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
-// Laufen ist ca. 1.4x belastender als Rad aus deiner Sicht
-const RUN_FACTOR = 1.4; // 50 "Belastung" Lauf ≈ 70 "Belastung" Rad
-
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
@@ -466,7 +463,7 @@ async function handle() {
       microFactor *= 0.7; // stärker runter
     }
 
-    // Rohes Tagesziel (wir interpretieren das als LAUF-TSS)
+    // Rohes Tagesziel (Tages-TSS)
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
 
     // f) Obergrenzen
@@ -482,13 +479,12 @@ async function handle() {
       Math.min(dailyTargetRaw, maxDaily)
     );
 
-    // sportartspezifische Tagesziele:
-    const runTarget = dailyTarget; // Lauf ist Referenz
-    const bikeTarget = Math.round(runTarget * RUN_FACTOR);
+    // Single-TSS-Target (kein Sportsplit)
+    const tssTarget = dailyTarget;
 
-    // TSS-Range (z.B. 80–120% des Lauf-Tagesziels)
-    const tssLow = Math.round(runTarget * 0.8);
-    const tssHigh = Math.round(runTarget * 1.2);
+    // Range 80–120 %
+    const tssLow = Math.round(tssTarget * 0.8);
+    const tssHigh = Math.round(tssTarget * 1.2);
 
     // 7) WochenPlan
     const emojiToday = stateEmoji(weekState);
@@ -506,7 +502,7 @@ async function handle() {
       `CTL: ${ctl.toFixed(1)}\n` +
       `ATL: ${atl.toFixed(1)}\n` +
       `TSB (Form): ${tsb.toFixed(1)}\n` +
-      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
+      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n" +
       "\n" +
       "Mikrozyklus dieser Woche:\n" +
       `Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}\n` +
@@ -521,14 +517,13 @@ async function handle() {
       `dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}\n` +
       `maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
       "\n" +
-      `Geplantes Tagesziel heute (interpretiert als Lauf-TSS, gecapped): ${runTarget} TSS\n` +
-      `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (ca. 80–120% des Ziels) \n` ;
-      
+      `Tagesziel: ${tssTarget} TSS\n` +
+      `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)\n`;
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
       id: today,
-      [INTERVALS_TARGET_FIELD]: runTarget, // Tagesziel = Lauf-TSS
+      [INTERVALS_TARGET_FIELD]: tssTarget, // Tagesziel = TSS
       [INTERVALS_PLAN_FIELD]: planTextToday,
       comments: commentText
       // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
@@ -577,7 +572,7 @@ async function handle() {
     );
 
     return new Response(
-      `OK: Tagesziel(Lauf)=${runTarget}, Rad-Empfehlung=${bikeTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}`,
+      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}`,
       { status: 200 }
     );
   } catch (err) {
