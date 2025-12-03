@@ -7,7 +7,7 @@ const INTERVALS_TARGET_FIELD = "TageszielTSS";          // numerisches Feld in W
 const INTERVALS_PLAN_FIELD = "WochenPlan";              // Textfeld in Wellness
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";            // numerisches Feld für Wochenziel
 const DAILY_TYPE_FIELD = "TagesTyp";                    // Textfeld / Emoji-Feld für TagesTyp
-
+const TRAINING_DAYS_PER_WEEK = 4.5;
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
