@@ -208,7 +208,7 @@ async function simulatePlannedWeeks(
       [planField]: planText
     };
 
-    await fetch(
+    const resFuture = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
       {
         method: "PUT",
@@ -219,6 +219,19 @@ async function simulatePlannedWeeks(
         body: JSON.stringify(payloadFuture)
       }
     );
+
+    if (!resFuture.ok) {
+      const txt = await resFuture.text();
+      console.error(
+        "Failed to update future wellness:",
+        mondayId,
+        resFuture.status,
+        txt
+      );
+    } else if (resFuture.body) {
+      // Body explizit abbrechen, damit keine "stalled response" entsteht
+      resFuture.body.cancel();
+    }
 
     ctlStart = ctlEnd;
     atlStart = atlEnd;
@@ -373,6 +386,8 @@ async function handle() {
               }
             }
           }
+        } else if (actRes.body) {
+          actRes.body.cancel();
         }
       } catch (e) {
         console.error("Error in weekly Rad protection logic:", e);
@@ -437,7 +452,10 @@ async function handle() {
       for (const day of weekArr) {
         if (day.ctlLoad != null) weekLoad += day.ctlLoad;
       }
+    } else if (weekRes.body) {
+      weekRes.body.cancel();
     }
+
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
     const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -544,23 +562,23 @@ async function handle() {
 
     // 8) Kommentartext vorbereiten
     let commentText =
-      `Erklärung zum heutigen Trainingsziel:\n` +
-      `\n` +
+      "Erklärung zum heutigen Trainingsziel:\n" +
+      "\n" +
       `Wochenziel: ${weeklyTarget} TSS\n` +
       `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
       `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
-      `\n` +
-      `Aktuelle Fitness und Form:\n` +
+      "\n" +
+      "Aktuelle Fitness und Form:\n" +
       `CTL: ${ctl.toFixed(1)}\n` +
       `ATL: ${atl.toFixed(1)}\n` +
       `TSB (Form): ${tsb.toFixed(1)}\n` +
       `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
-      `\n` +
-      `Mikrozyklus dieser Woche:\n` +
+      "\n" +
+      "Mikrozyklus dieser Woche:\n" +
       `Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}\n` +
       `Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}\n` +
-      `\n` +
-      `Rechenweg:\n` +
+      "\n" +
+      "Rechenweg:\n" +
       `targetFromWeek = ${weeklyTarget} / ${TRAINING_DAYS_PER_WEEK} = ${targetFromWeek.toFixed(1)}\n` +
       `baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${baseFromFitness.toFixed(1)}\n` +
       `combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}\n` +
@@ -568,10 +586,10 @@ async function handle() {
       `microFactor = ${microFactor.toFixed(2)}\n` +
       `dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}\n` +
       `maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}\n` +
-      `\n` +
+      "\n" +
       `Geplantes Tagesziel heute (interpretiert als Lauf-TSS, gecapped): ${runTarget} TSS\n` +
-      `\n` +
-      `Sportartspezifisches Tagesziel:\n` +
+      "\n" +
+      "Sportartspezifisches Tagesziel:\n" +
       `Laufen: ${runTarget} TSS\n` +
       `Rad:    ${bikeTarget} TSS (Rad ist orthopädisch weniger belastend, daher höheres TSS-Ziel bei gleicher empfundenen Belastung)\n`;
 
@@ -579,18 +597,18 @@ async function handle() {
     if (today === mondayStr && lastWeekTotalTss != null) {
       const rideFrac = lastWeekTotalTss > 0 ? (lastWeekRideTss / lastWeekTotalTss) : 0;
       commentText +=
-        `\n` +
-        `Wochenrückblick letzte Woche:\n` +
+        "\n" +
+        "Wochenrückblick letzte Woche:\n" +
         `Gesamt-TSS letzte Woche: ${lastWeekTotalTss.toFixed(0)}\n` +
         `Davon Rad-TSS: ${lastWeekRideTss.toFixed(0)} (${(rideFrac * 100).toFixed(0)}%)\n` +
         `Davon Lauf-TSS: ${lastWeekRunTss.toFixed(0)}\n`;
 
       if (weeklyCappedByRad) {
         commentText +=
-          `Da der Großteil der Belastung über Rad kam, wurde die Erhöhung des Wochenziels auf maximal +7% gegenüber der Vorwoche begrenzt, um eine zu harte Laufwoche zu vermeiden.\n`;
+          "Da der Großteil der Belastung über Rad kam, wurde die Erhöhung des Wochenziels auf maximal +7% gegenüber der Vorwoche begrenzt, um eine zu harte Laufwoche zu vermeiden.\n";
       } else {
         commentText +=
-          `Die Verteilung der Sportarten war ausreichend ausgewogen, daher wurde das Wochenziel normal gemäß deiner Form und deinem Verlauf angepasst.\n`;
+          "Die Verteilung der Sportarten war ausreichend ausgewogen, daher wurde das Wochenziel normal gemäß deiner Form und deinem Verlauf angepasst.\n";
       }
     }
 
@@ -618,12 +636,16 @@ async function handle() {
         body: JSON.stringify(payloadToday)
       }
     );
+
     if (!updateRes.ok) {
       const text = await updateRes.text();
       return new Response(
         `Failed to update wellness: ${updateRes.status} ${text}`,
         { status: 500 }
       );
+    } else if (updateRes.body) {
+      // Erfolgsfall: Body explizit abbrechen
+      updateRes.body.cancel();
     }
 
     // 10) Zukünftige Wochen planen
