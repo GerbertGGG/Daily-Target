@@ -407,15 +407,17 @@ async function handle() {
 
     // 8) Wellness heute updaten (ohne TagesTyp)
     const payloadToday = {
-      id: today,
-      [INTERVALS_TARGET_FIELD]: dailyTarget,
-      [INTERVALS_PLAN_FIELD]: planTextToday
-      // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
-    };
+  id: today,
+  [INTERVALS_TARGET_FIELD]: dailyTarget,
+  [INTERVALS_PLAN_FIELD]: planTextToday,
+  comments: commentText   // 👈 hier kommt die Erklärung rein
+  // DAILY_TYPE_FIELD lassen wir absichtlich weg
+};
 
-    if (today === mondayStr) {
-      payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
-    }
+if (today === mondayStr) {
+  payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
+}
+
 
     const updateRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
@@ -437,36 +439,25 @@ async function handle() {
     }
 
     // 9) Day Notes (Tageskommentar) schreiben – nur Text
-    const notesText =
-      `Erklärung zum heutigen Trainingsziel:\n` +
-      `\n` +
-      `Wochenziel: ${weeklyTarget} TSS\n` +
-      `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
-      `Schätzung TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
-      `\n` +
-      `Aktuelle Fitness und Form:\n` +
-      `CTL: ${ctl.toFixed(1)}\n` +
-      `ATL: ${atl.toFixed(1)}\n` +
-      `TSB (Form): ${tsb.toFixed(1)}\n` +
-      `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
-      `\n` +
-      `Einschätzung:\n` +
-      `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form. ` +
-      `Je höher deine Form (TSB) und je fitter du wirst (höherer CTL), desto höher fällt dieses Tagesziel aus.\n` +
-      `\n` +
-      `Geplantes Tagesziel: ~${dailyTarget} TSS.\n`;
+   const commentText =
+  `Erklärung zum heutigen Trainingsziel:\n` +
+  `\n` +
+  `Wochenziel: ${weeklyTarget} TSS\n` +
+  `Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}\n` +
+  `Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}\n` +
+  `\n` +
+  `Aktuelle Fitness und Form:\n` +
+  `CTL: ${ctl.toFixed(1)}\n` +
+  `ATL: ${atl.toFixed(1)}\n` +
+  `TSB (Form): ${tsb.toFixed(1)}\n` +
+  `Taperphase: ${inTaper ? "Ja" : "Nein"}\n` +
+  `\n` +
+  `Einschätzung:\n` +
+  `Das Tagesziel basiert auf deinem Wochenziel, deiner aktuellen Fitness und deiner Form.\n` +
+  `Je höher deine Form (TSB) und je höher dein CTL, desto höher fällt das Tagesziel aus.\n` +
+  `\n` +
+  `Geplantes Tagesziel heute: ~${dailyTarget} TSS.\n`;
 
-    await fetch(
-      `${BASE_URL}/athlete/${athleteId}/day-notes/${today}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader
-        },
-        body: JSON.stringify({ notes: notesText })
-      }
-    );
 
     // 10) Zukünftige Wochen planen
     const WEEKS_TO_SIMULATE = 7;
