@@ -11,6 +11,9 @@ const DAILY_TYPE_FIELD = "TagesTyp";                    // Textfeld für Tages-E
 // Wie viele Trainingstage planen wir pro Woche realistisch?
 const TRAINING_DAYS_PER_WEEK = 4.5; // z.B. 4.0 oder 5.0
 
+// Debug-Ausgabe der Berechnung in TagesTyp?
+const DEBUG_MODE = true;
+
 // Taper-Konstanten (Variante C)
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
@@ -462,4 +465,15 @@ async function handle() {
     const trainingDensity = TRAINING_DAYS_PER_WEEK / 7;
     const effectiveRemaining = Math.max(1, remainingDays * trainingDensity);
 
-    // --- Basis-Tageszi
+    // --- Basis-Tagesziel (Plan) ---
+    const planTarget = dailyTargetBase * taperDailyFactor * dailyAdj;
+
+    // --- Catch-Up-Logik: auf effektive Trainingstage verteilen ---
+    let catchupMultiplier = 1.0;
+    if (tsb >= 10) {
+      catchupMultiplier = 1.3;   // frisch → etwas aggressiver aufholen
+    } else if (tsb <= -10) {
+      catchupMultiplier = 0.5;   // müde → vorsichtiger
+    }
+
+    let catchupPerDay = 0;
