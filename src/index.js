@@ -523,10 +523,7 @@ async function handle() {
       "\n" +
       `Geplantes Tagesziel heute (interpretiert als Lauf-TSS, gecapped): ${runTarget} TSS\n` +
       `Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (ca. 80–120% des Ziels)\n` +
-      "\n" +
-      "Sportartspezifisches Tagesziel (HF/TRIMP-basiert, daher gut vergleichbar):\n" +
-      `Laufen: ${runTarget} TSS\n` +
-      `Rad:    ${bikeTarget} TSS (Rad ist orthopädisch weniger belastend, daher höheres TSS-Ziel bei gleicher empfundenen Belastung)\n`;
+      
 
     // 9) Wellness heute updaten (ohne TagesTyp, aber mit comments)
     const payloadToday = {
