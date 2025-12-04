@@ -430,6 +430,8 @@ async function handle() {
     const twoDaysAgoId = twoDaysAgoDate.toISOString().slice(0, 10);
     const twoDaysAgoLoad = ctlLoadByDate.get(twoDaysAgoId) ?? 0;
 
+    const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
+
     // 6) Tagesziel – aus Woche, Fitness, Form, Taper, Mikrozyklus
 
     // a) Wochen-Sicht: TSS pro Trainingstag
@@ -450,22 +452,20 @@ async function handle() {
     else if (tsb <= -10) tsbFactor = 0.6;
     else if (tsb <= -5) tsbFactor = 0.8;
 
-   // 1) Pausentage → leicht hochskalieren, wenn Form nicht schlecht
+    // e) Mikrozyklus-Faktor: Pausen, Serien & Load der letzten Tage
+    let microFactor = 1.0;
+    let suggestRestDay = false;
 
-// a) Gestern war komplett frei → kleiner Bonus
-if (yesterdayLoad === 0 && tsb >= 0) {
-  microFactor *= 1.10; // +10%
-}
-
-// b) 2+ Tage ohne Training → größerer Bonus
-if (daysSinceLastTraining >= 2 && tsb >= 0) {
-  microFactor *= 1.25; // +25%
-}
-
-// c) 3+ Tage → nochmal ein wenig oben drauf
-if (daysSinceLastTraining >= 3 && tsb >= 0) {
-  microFactor *= 1.10; // zusätzlich +10% → insgesamt ~+51%
-}
+    // 1) Pausentage / Ruhetag gestern → leicht hochskalieren, wenn Form nicht schlecht
+    if (yesterdayLoad === 0 && tsb >= 0) {
+      microFactor *= 1.10; // +10% nach einem Ruhetag
+    }
+    if (daysSinceLastTraining >= 2 && tsb >= 0) {
+      microFactor *= 1.25; // +25% nach ≥2 Tagen Pause
+    }
+    if (daysSinceLastTraining >= 3 && tsb >= 0) {
+      microFactor *= 1.10; // zusätzlicher kleiner Boost
+    }
 
     // 2) Serien: viele Tage am Stück → runter
     let fatigueFactor = 1.0;
@@ -489,7 +489,6 @@ if (daysSinceLastTraining >= 3 && tsb >= 0) {
     }
 
     // 4) Zwei-Tage-Kombi: wenn die letzten 2 Tage zusammen sehr hoch waren
-    const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
     const highTwoDayThreshold = Math.max(3.0 * targetFromWeek, 120);
 
     if (last2DaysLoad >= highTwoDayThreshold && tsb <= -5) {
