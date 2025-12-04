@@ -310,7 +310,7 @@ async function handle() {
     if (weekState === "Erholt") factor = 8;
     if (weekState === "Müde") factor = 5.5;
 
-    // 3b) Wochenziel (ohne Rad-lastig-Schutz)
+    // 3b) Wochenziel
     let weeklyTarget;
     if (today === mondayStr) {
       weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
@@ -419,6 +419,17 @@ async function handle() {
       }
     }
 
+    // Load der letzten beiden Tage
+    const yesterdayDate = new Date(todayDate);
+    yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+    const yesterdayId = yesterdayDate.toISOString().slice(0, 10);
+    const yesterdayLoad = ctlLoadByDate.get(yesterdayId) ?? 0;
+
+    const twoDaysAgoDate = new Date(todayDate);
+    twoDaysAgoDate.setUTCDate(twoDaysAgoDate.getUTCDate() - 2);
+    const twoDaysAgoId = twoDaysAgoDate.toISOString().slice(0, 10);
+    const twoDaysAgoLoad = ctlLoadByDate.get(twoDaysAgoId) ?? 0;
+
     // 6) Tagesziel – aus Woche, Fitness, Form, Taper, Mikrozyklus
 
     // a) Wochen-Sicht: TSS pro Trainingstag
@@ -427,7 +438,7 @@ async function handle() {
     // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
     const baseFromFitness = dailyTargetBase * taperDailyFactor;
 
-    // c) Kombination: eher Wochenziel-getrieben
+    // c) Kombination: eher Wochenziel-getrieben (so wie du es magst)
     const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
     // d) Form-Faktor (TSB)
@@ -439,9 +450,11 @@ async function handle() {
     else if (tsb <= -10) tsbFactor = 0.6;
     else if (tsb <= -5) tsbFactor = 0.8;
 
-    // e) Mikrozyklus-Faktor
+    // e) Mikrozyklus-Faktor: Pausen, Serien & Load der letzten Tage
     let microFactor = 1.0;
+    let suggestRestDay = false;
 
+    // 1) Pausentage → leicht hochskalieren, wenn Form nicht schlecht
     if (daysSinceLastTraining >= 2 && tsb >= 0) {
       microFactor *= 1.25;
     }
@@ -449,12 +462,36 @@ async function handle() {
       microFactor *= 1.10;
     }
 
+    // 2) Serien: viele Tage am Stück → runter
+    let fatigueFactor = 1.0;
+
     if (consecutiveTrainingDays >= 3) {
-      microFactor *= 0.8;
+      fatigueFactor = Math.min(fatigueFactor, 0.8);
     }
     if (consecutiveTrainingDays >= 4) {
-      microFactor *= 0.7;
+      fatigueFactor = Math.min(fatigueFactor, 0.7);
     }
+
+    // 3) Load-basiert: sehr hoher TSS gestern → stärker runter
+    const heavyThreshold = Math.max(1.5 * targetFromWeek, 60);       // "hart"
+    const veryHeavyThreshold = Math.max(2.3 * targetFromWeek, 90);   // "sehr hart"
+
+    if (yesterdayLoad >= veryHeavyThreshold && tsb <= -5) {
+      fatigueFactor = Math.min(fatigueFactor, 0.4);
+      suggestRestDay = true;
+    } else if (yesterdayLoad >= heavyThreshold && tsb <= 0) {
+      fatigueFactor = Math.min(fatigueFactor, 0.6);
+    }
+
+    // 4) Zwei-Tage-Kombi: wenn die letzten 2 Tage zusammen sehr hoch waren
+    const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
+    const highTwoDayThreshold = Math.max(3.0 * targetFromWeek, 120);
+
+    if (last2DaysLoad >= highTwoDayThreshold && tsb <= -5) {
+      fatigueFactor = Math.min(fatigueFactor, 0.6);
+    }
+
+    microFactor *= fatigueFactor;
 
     // Rohes Tagesziel (TSS)
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
@@ -481,7 +518,7 @@ async function handle() {
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Kommentar als Template-String (kein +-Chaos)
+    // 8) Kommentar als Template-String
     const commentText = `Erklärung zum heutigen Trainingsziel:
 
 Wochenziel: ${weeklyTarget} TSS
@@ -497,6 +534,14 @@ Taperphase: ${inTaper ? "Ja" : "Nein"}
 Mikrozyklus dieser Woche:
 Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}
 Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}
+Gestern geladene TSS (ctlLoad): ${yesterdayLoad.toFixed(1)}
+Vorgestern geladene TSS (ctlLoad): ${twoDaysAgoLoad.toFixed(1)}
+Letzte 2 Tage zusammen: ${last2DaysLoad.toFixed(1)} TSS
+Ruhe-/Belastungs-Empfehlung: ${
+  suggestRestDay
+    ? "Empfehlung: Heute eher Ruhetag oder nur sehr lockere, kurze Einheit."
+    : "Normale Belastung möglich – auf Körpergefühl achten."
+}
 
 Rechenweg:
 targetFromWeek = ${weeklyTarget} / ${TRAINING_DAYS_PER_WEEK} = ${targetFromWeek.toFixed(1)}
@@ -562,7 +607,7 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
     );
 
     return new Response(
-      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}`,
+      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}`,
       { status: 200 }
     );
   } catch (err) {
