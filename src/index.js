@@ -450,17 +450,22 @@ async function handle() {
     else if (tsb <= -10) tsbFactor = 0.6;
     else if (tsb <= -5) tsbFactor = 0.8;
 
-    // e) Mikrozyklus-Faktor: Pausen, Serien & Load der letzten Tage
-    let microFactor = 1.0;
-    let suggestRestDay = false;
+   // 1) Pausentage → leicht hochskalieren, wenn Form nicht schlecht
 
-    // 1) Pausentage → leicht hochskalieren, wenn Form nicht schlecht
-    if (daysSinceLastTraining >= 2 && tsb >= 0) {
-      microFactor *= 1.25;
-    }
-    if (daysSinceLastTraining >= 3 && tsb >= 0) {
-      microFactor *= 1.10;
-    }
+// a) Gestern war komplett frei → kleiner Bonus
+if (yesterdayLoad === 0 && tsb >= 0) {
+  microFactor *= 1.10; // +10%
+}
+
+// b) 2+ Tage ohne Training → größerer Bonus
+if (daysSinceLastTraining >= 2 && tsb >= 0) {
+  microFactor *= 1.25; // +25%
+}
+
+// c) 3+ Tage → nochmal ein wenig oben drauf
+if (daysSinceLastTraining >= 3 && tsb >= 0) {
+  microFactor *= 1.10; // zusätzlich +10% → insgesamt ~+51%
+}
 
     // 2) Serien: viele Tage am Stück → runter
     let fatigueFactor = 1.0;
