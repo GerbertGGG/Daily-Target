@@ -340,7 +340,8 @@ async function handle() {
             progress = 1;
           } else {
             const pos = dayIndex - taperStartIndex;
-            progress = Math.max(0, Math.min(1, pos / (taperDays - 1)));
+            const progressRaw = pos / (taperDays - 1);
+            progress = Math.max(0, Math.min(1, progressRaw));
           }
 
           taperDailyFactor =
