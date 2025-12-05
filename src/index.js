@@ -10,7 +10,6 @@ const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 
 // realistische Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0;
-
 // Taper-Konstanten
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
