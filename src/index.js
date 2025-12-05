@@ -28,10 +28,50 @@ function computeDailyTarget(ctl, atl) {
 
 function classifyWeek(ctl, atl, rampRate) {
   const tsb = ctl - atl;
-  if (rampRate <= -0.5 && tsb >= -5) return { state: "Erholt", tsb };
-  if (rampRate >= 1.0 || tsb <= -10 || atl > ctl + 5) return { state: "Müde", tsb };
+
+  // 1) Dynamischer TSB-Schwellenwert abhängig vom CTL
+  let tsbCritical;
+  if (ctl < 50) {
+    tsbCritical = -5;   // wenig Trainingsbasis → früher müde
+  } else if (ctl < 80) {
+    tsbCritical = -10;  // „normaler“ Bereich
+  } else {
+    tsbCritical = -15;  // sehr fit → mehr Negativ-TSB tolerierbar
+  }
+  const isTsbTired = tsb <= tsbCritical;
+
+  // 2) ATL/CTL-Ratio statt fixer +5
+  let atlCtlRatio = Infinity;
+  if (ctl > 0) {
+    atlCtlRatio = atl / ctl;
+  }
+
+  let atlRatioThreshold;
+  if (ctl < 50) {
+    atlRatioThreshold = 1.2;  // empfindlicher bei niedriger Fitness
+  } else if (ctl < 80) {
+    atlRatioThreshold = 1.3;
+  } else {
+    atlRatioThreshold = 1.4;  // bei hoher Fitness darf ATL relativ höher sein
+  }
+  const isAtlHigh = atlCtlRatio >= atlRatioThreshold;
+
+  // 3) Ramp-Rate wie gehabt
+  const isRampHigh = rampRate >= 1.0;
+  const isRampLowAndFresh = rampRate <= -0.5 && tsb >= -5;
+
+  // 4) Entscheidung
+  if (isRampLowAndFresh) {
+    return { state: "Erholt", tsb };
+  }
+
+  if (isRampHigh || isTsbTired || isAtlHigh) {
+    return { state: "Müde", tsb };
+  }
+
   return { state: "Normal", tsb };
 }
+
 
 function stateEmoji(state) {
   if (state === "Erholt") return "🔥";
