@@ -310,7 +310,7 @@ async function handle() {
     if (weekState === "Erholt") factor = 8;
     if (weekState === "Müde") factor = 5.5;
 
-    // 3b) Wochenziel
+    // 3b) Wochenziel – nur Montag neu/aktualisiert
     let weeklyTarget;
     if (today === mondayStr) {
       weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
@@ -320,9 +320,9 @@ async function handle() {
       weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
     }
 
-    // 4) Event & Taper
+    // 4) Event & Taper – wirkt nur auf Tagesziel, NICHT aufs Wochenziel
     let taperDailyFactor = 1.0;
-    let taperWeeklyFactor = 1.0;
+    let taperWeeklyFactor = 1.0; // behalten wir für Simulation/evtl. spätere Nutzung
     let inTaper = false;
 
     try {
@@ -360,7 +360,7 @@ async function handle() {
       console.error("Error in event/taper logic:", e);
     }
 
-    weeklyTarget = Math.round(weeklyTarget * taperWeeklyFactor);
+    // WICHTIG: weeklyTarget bleibt unverändert, kein * taperWeeklyFactor hier!
 
     // 5) Wochenload summieren + Daten für Mikrozyklus
     let weekLoad = 0;
@@ -379,6 +379,23 @@ async function handle() {
     }
 
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
+
+    // Wochenfortschritt für Wellness-Anzeige (Prozent + ASCII-Balken)
+    const weekDone = Math.max(0, Math.min(weeklyTarget, weekLoad));
+
+    let weekPercent = 0;
+    if (weeklyTarget > 0) {
+      weekPercent = Math.round((weekDone / weeklyTarget) * 100);
+    }
+    weekPercent = Math.max(0, Math.min(200, weekPercent));
+
+    let weekBarFilled = 0;
+    if (weeklyTarget > 0) {
+      weekBarFilled = Math.round((weekDone / weeklyTarget) * 10);
+    }
+    weekBarFilled = Math.max(0, Math.min(10, weekBarFilled));
+
+    const weekBar = "█".repeat(weekBarFilled) + "░".repeat(10 - weekBarFilled);
 
     const MS_PER_DAY = 24 * 60 * 60 * 1000;
     const daysSinceMonday = Math.round(
@@ -440,7 +457,7 @@ async function handle() {
     // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
     const baseFromFitness = dailyTargetBase * taperDailyFactor;
 
-    // c) Kombination: eher Wochenziel-getrieben (so wie du es magst)
+    // c) Kombination: eher Wochenziel-getrieben
     const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
     // d) Form-Faktor (TSB)
@@ -518,9 +535,9 @@ async function handle() {
     const tssLow = Math.round(tssTarget * 0.8);
     const tssHigh = Math.round(tssTarget * 1.2);
 
-    // 7) WochenPlan
+    // 7) WochenPlan mit Balken
     const emojiToday = stateEmoji(weekState);
-    const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
+    const planTextToday = `Rest ${weeklyRemaining} | ${weekPercent}% [${weekBar}] | ${emojiToday} ${weekState}`;
 
     // 8) Kommentar als Template-String
     const commentText = `Erklärung zum heutigen Trainingsziel:
@@ -528,6 +545,9 @@ async function handle() {
 Wochenziel: ${weeklyTarget} TSS
 Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}
 Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}
+
+Wochenfortschritt:
+[${weekBar}] ${weekPercent}% der Wochenlast erledigt (TSS: ${weekLoad.toFixed(1)}/${weeklyTarget})
 
 Aktuelle Fitness und Form:
 CTL: ${ctl.toFixed(1)}
