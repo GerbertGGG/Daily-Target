@@ -322,7 +322,7 @@ async function handle() {
 
     // 4) Event & Taper – wirkt nur auf Tagesziel, NICHT aufs Wochenziel
     let taperDailyFactor = 1.0;
-    let taperWeeklyFactor = 1.0; // behalten wir für Simulation/evtl. spätere Nutzung
+    let taperWeeklyFactor = 1.0; // nur für Simulation / spätere Nutzung
     let inTaper = false;
 
     try {
@@ -360,7 +360,7 @@ async function handle() {
       console.error("Error in event/taper logic:", e);
     }
 
-    // WICHTIG: weeklyTarget bleibt unverändert, kein * taperWeeklyFactor hier!
+    // weeklyTarget bleibt unverändert (kein * taperWeeklyFactor)
 
     // 5) Wochenload summieren + Daten für Mikrozyklus
     let weekLoad = 0;
@@ -380,7 +380,7 @@ async function handle() {
 
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
-    // Wochenfortschritt für Wellness-Anzeige (Prozent + ASCII-Balken)
+    // Wochenfortschritt für Kommentar (nur dort Balken)
     const weekDone = Math.max(0, Math.min(weeklyTarget, weekLoad));
 
     let weekPercent = 0;
@@ -496,7 +496,7 @@ async function handle() {
 
     // 3) Load-basiert: sehr hoher TSS gestern → stärker runter
     const heavyThreshold = Math.max(1.5 * targetFromWeek, 60);       // "hart"
-    const veryHeavyThreshold = Math.max(2.3 * targetFromWeek, 90);   // "sehr hart"
+    const veryHeavyThreshold = Math.max(2.3 * targetFromWeek, 90);   // "sehr hart";
 
     if (yesterdayLoad >= veryHeavyThreshold && tsb <= -5) {
       fatigueFactor = Math.min(fatigueFactor, 0.4);
@@ -535,11 +535,11 @@ async function handle() {
     const tssLow = Math.round(tssTarget * 0.8);
     const tssHigh = Math.round(tssTarget * 1.2);
 
-    // 7) WochenPlan mit Balken
+    // 7) WochenPlan OHNE Balken (clean)
     const emojiToday = stateEmoji(weekState);
-    const planTextToday = `Rest ${weeklyRemaining} | ${weekPercent}% [${weekBar}] | ${emojiToday} ${weekState}`;
+    const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Kommentar als Template-String
+    // 8) Kommentar mit Balken
     const commentText = `Erklärung zum heutigen Trainingsziel:
 
 Wochenziel: ${weeklyTarget} TSS
