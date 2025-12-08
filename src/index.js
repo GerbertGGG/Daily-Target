@@ -325,3 +325,11 @@ function computeDailyTarget(ctl, atl) {
   const dailyTss = ctl * (base + k * tsbClamped);
   return Math.round(Math.max(0, Math.min(dailyTss, ctl * 1.5)));
 }
+export default {
+  async fetch(request, env, ctx) {
+    return handle(env);
+  },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handle(env));
+  }
+};
