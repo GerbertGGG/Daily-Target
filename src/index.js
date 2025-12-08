@@ -1,3 +1,4 @@
+
 const BASE_URL = "https://intervals.icu/api/v1";
 // 🔥 Hardcoded Variablen – HIER deine Werte eintragen!
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
@@ -7,7 +8,7 @@ const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 
-// realistische Anzahl Trainingstage pro Woche
+// realistische Anzahl Trainingstage pro Woche (Fallback)
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
 // Taper-Konstanten
@@ -15,6 +16,179 @@ const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
 const TAPER_DAILY_START = 0.8;
 const TAPER_DAILY_END = 0.3;
+
+// ---------------------------------------------------------
+// Adaptive Ramp – Hilfsfunktionen
+// ---------------------------------------------------------
+
+function median(values) {
+  if (!values || values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+// CTL-Delta-Fenster aus der Historie ableiten
+function deriveAdaptiveCtlRampWindow(weeklyCtlHistory) {
+  if (!weeklyCtlHistory || weeklyCtlHistory.length < 2) {
+    // Fallback ohne History
+    return { minDelta: -2, maxDelta: 2, medianDelta: 0 };
+  }
+  const deltas = [];
+  for (let i = 1; i < weeklyCtlHistory.length; i++) {
+    deltas.push(weeklyCtlHistory[i] - weeklyCtlHistory[i - 1]);
+  }
+  if (!deltas.length) {
+    return { minDelta: -2, maxDelta: 2, medianDelta: 0 };
+  }
+  const med = median(deltas);
+
+  // Fenster um den Median herum (z.B. ±0.7 CTL/Woche)
+  let minDelta = med - 0.7;
+  let maxDelta = med + 0.7;
+
+  // Sicherheitskappen: nie mehr als ±3 CTL/Woche
+  minDelta = Math.max(minDelta, -3);
+  maxDelta = Math.min(maxDelta, 3);
+
+  return { minDelta, maxDelta, medianDelta: med };
+}
+
+// Verbindung Weekly-TSS ↔ CTL-Delta (vereinfacht)
+function weeklyTssFromCtlDelta(ctlNow, ctlDelta) {
+  const targetAvgDailyTss = ctlNow + ctlDelta;
+  return 7 * targetAvgDailyTss;
+}
+
+function ctlDeltaFromWeeklyTss(ctlNow, weeklyTss) {
+  const avgDailyTss = weeklyTss / 7;
+  return avgDailyTss - ctlNow;
+}
+
+// Wunsch-Ramp in % (nur grob, wird später durch CTL-Fenster geclamped)
+function computeBaseRampPercent(classification, achievedCat) {
+  // classification: "Müde" | "Normal" | "Erholt"
+  if (classification === "Müde") {
+    return -0.20;
+  }
+  if (classification === "Normal") {
+    if (achievedCat === "untererfuellt") return -0.05;
+    if (achievedCat === "erfuellt")      return 0.05;
+    return 0.07; // übererfüllt
+  }
+  if (classification === "Erholt") {
+    if (achievedCat === "untererfuellt") return 0.0;
+    if (achievedCat === "erfuellt")      return 0.08;
+    return 0.10; // übererfüllt
+  }
+  return 0;
+}
+
+// Montags-CTL-Historie holen (CTL der letzten n Montagswerte)
+async function fetchWeeklyCtlHistory(mondayDate, weeksBack, athleteId, authHeader) {
+  const mondayStr = mondayDate.toISOString().slice(0, 10);
+  const startDate = new Date(mondayDate);
+  startDate.setUTCDate(startDate.getUTCDate() - weeksBack * 7);
+  const oldest = startDate.toISOString().slice(0, 10);
+
+  const res = await fetch(
+    `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${oldest}&newest=${mondayStr}&cols=id,ctl`,
+    { headers: { Authorization: authHeader } }
+  );
+  if (!res.ok) {
+    if (res.body) res.body.cancel?.();
+    return [];
+  }
+  const arr = await res.json();
+  const ctlById = new Map();
+  for (const d of arr) {
+    if (d.id && d.ctl != null) {
+      ctlById.set(d.id, d.ctl);
+    }
+  }
+
+  const history = [];
+  // Älteste Woche zuerst
+  for (let i = weeksBack; i >= 0; i--) {
+    const d = new Date(mondayDate);
+    d.setUTCDate(d.getUTCDate() - i * 7);
+    const id = d.toISOString().slice(0, 10);
+    const ctl = ctlById.get(id);
+    if (ctl != null) {
+      history.push(ctl);
+    }
+  }
+  return history;
+}
+
+// Adaptive Wochenziel-Berechnung basierend auf:
+// - letzter Woche (Target + Ist)
+// - aktuellem CTL
+// - historischer CTL-Rampe
+function computeNextWeekTargetAdaptive({
+  ctlNow,
+  weeklyTargetLast,
+  weeklyActualLast,
+  classification,   // "Müde" | "Normal" | "Erholt"
+  weeklyCtlHistory
+}) {
+  if (weeklyTargetLast == null || weeklyActualLast == null) {
+    return null; // kein adaptives Ziel möglich
+  }
+
+  const achieved = weeklyActualLast / weeklyTargetLast;
+  let achievedCat;
+  if (achieved < 0.8) achievedCat = "untererfuellt";
+  else if (achieved <= 1.05) achievedCat = "erfuellt";
+  else achievedCat = "uebererfuellt";
+
+  const baseRamp = computeBaseRampPercent(classification, achievedCat);
+
+  // "Wunsch"-Wochenziel rein aus der Ramp-Logik
+  let desiredWeeklyTarget = weeklyTargetLast * (1 + baseRamp);
+
+  // harte Caps auf %-Änderung, bevor CTL-Fenster greift
+  desiredWeeklyTarget = Math.max(
+    weeklyTargetLast * 0.75,
+    Math.min(weeklyTargetLast * 1.25, desiredWeeklyTarget)
+  );
+
+  // resultierende CTL-Änderung
+  const desiredCtlDelta = ctlDeltaFromWeeklyTss(ctlNow, desiredWeeklyTarget);
+
+  // adaptives CTL-Fenster aus Historie
+  const { minDelta, maxDelta, medianDelta } =
+    deriveAdaptiveCtlRampWindow(weeklyCtlHistory);
+
+  let clampedCtlDelta = desiredCtlDelta;
+  if (clampedCtlDelta < minDelta) clampedCtlDelta = minDelta;
+  if (clampedCtlDelta > maxDelta) clampedCtlDelta = maxDelta;
+
+  // daraus neues Wochen-TSS
+  let nextWeekTarget = weeklyTssFromCtlDelta(ctlNow, clampedCtlDelta);
+
+  // Regression verhindern, wenn Woche erfüllt und nicht müde
+  if (achieved >= 0.9 && classification !== "Müde") {
+    nextWeekTarget = Math.max(nextWeekTarget, weeklyTargetLast);
+  }
+
+  // auf 5er-TSS runden
+  nextWeekTarget = Math.round(nextWeekTarget / 5) * 5;
+
+  return {
+    nextWeekTarget,
+    desiredWeeklyTarget,
+    desiredCtlDelta,
+    clampedCtlDelta,
+    rampPercentEffective: (nextWeekTarget / weeklyTargetLast) - 1,
+    achieved,
+    achievedCat,
+    ctlRampWindow: { minDelta, maxDelta, medianDelta }
+  };
+}
 
 // ---------------------------------------------------------
 // Hilfsfunktionen
@@ -410,46 +584,73 @@ async function handle() {
       console.error("Error fetching last week load:", e);
     }
 
-    // 3) Wochenzustand → Faktor
+    // 3) Wochenzustand → Basis-Faktor (Fallback)
     let factor = 7;
     if (weekState === "Erholt") factor = 8;
     if (weekState === "Müde") factor = 5.5;
 
-    // 3b) Wochenziel – nur setzen, wenn noch keins existiert
+    // 3a) CTL-Historie der letzten x Wochen holen (für Adaptive Ramp)
+    const WEEKS_BACK_FOR_CTL = 6;
+    const weeklyCtlHistory = await fetchWeeklyCtlHistory(
+      mondayDate,
+      WEEKS_BACK_FOR_CTL,
+      athleteId,
+      authHeader
+    );
+
+    // 3b) Wochenziel – ggf. adaptiv setzen, falls noch keins existiert
     let weeklyTarget;
+    let adaptiveInfo = null;
+
     if (mondayWeeklyTarget != null) {
-      // Es existiert bereits ein Wochenziel → dieses verwenden
+      // Montag hat schon ein Wochenziel → dieses verwenden (z.B. manuell gesetzt)
       weeklyTarget = mondayWeeklyTarget;
     } else {
-      // Erstes Mal diese Woche: aus CTL/ATL und weekState berechnen
-      let weeklyTargetRaw = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
-
-      // Steigerungs-/Anti-Rückschritt-Logik:
-      // Wenn letzte Woche Ziel weitgehend erreicht und du nicht "Müde" bist,
-      // dann i.d.R. nicht runtergehen und ggf. sogar leicht steigern.
-      const hitLastWeek =
+      // Versuche, ein adaptives Ziel basierend auf letzter Woche + CTL-Historie zu setzen
+      if (
         lastWeekTarget != null &&
         lastWeekActual != null &&
-        lastWeekActual >= 0.95 * lastWeekTarget; // ≥95% des Ziels
+        weeklyCtlHistory.length >= 2
+      ) {
+        adaptiveInfo = computeNextWeekTargetAdaptive({
+          ctlNow: ctlMon,
+          weeklyTargetLast: lastWeekTarget,
+          weeklyActualLast: lastWeekActual,
+          classification: weekState, // "Müde" | "Normal" | "Erholt"
+          weeklyCtlHistory
+        });
 
-      if (hitLastWeek && weekState !== "Müde") {
-        // niemals unter Vorwoche
-        let minAllowed = lastWeekTarget;
-
-        // Wenn du aktuell eher frisch bist (TSB >= 0),
-        // leicht steigern:
-        // - Normal: ca. +5%
-        // - Erholt: ca. +10%
-        if (tsb >= 0) {
-          const progFactor = (weekState === "Erholt") ? 1.10 : 1.05;
-          const progressive = lastWeekTarget * progFactor;
-          minAllowed = Math.max(minAllowed, progressive);
+        if (adaptiveInfo && adaptiveInfo.nextWeekTarget != null) {
+          weeklyTarget = adaptiveInfo.nextWeekTarget;
         }
-
-        weeklyTargetRaw = Math.max(weeklyTargetRaw, Math.round(minAllowed));
       }
 
-      weeklyTarget = weeklyTargetRaw;
+      // Fallback, falls adaptive Berechnung nicht möglich war
+      if (weeklyTarget == null) {
+        let weeklyTargetRaw = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+
+        // bisherige Steigerungs-/Anti-Rückschritt-Logik beibehalten:
+        const hitLastWeek =
+          lastWeekTarget != null &&
+          lastWeekActual != null &&
+          lastWeekActual >= 0.95 * lastWeekTarget; // ≥95% des Ziels
+
+        if (hitLastWeek && weekState !== "Müde") {
+          // niemals unter Vorwoche
+          let minAllowed = lastWeekTarget;
+
+          // Wenn du aktuell eher frisch bist (TSB >= 0), leicht steigern:
+          if (tsb >= 0) {
+            const progFactor = (weekState === "Erholt") ? 1.10 : 1.05;
+            const progressive = lastWeekTarget * progFactor;
+            minAllowed = Math.max(minAllowed, progressive);
+          }
+
+          weeklyTargetRaw = Math.max(weeklyTargetRaw, Math.round(minAllowed));
+        }
+
+        weeklyTarget = weeklyTargetRaw;
+      }
     }
 
     // 4) Event & Taper – wirkt nur auf Tagesziel, NICHT aufs Wochenziel
@@ -495,7 +696,46 @@ async function handle() {
 
     // weeklyTarget bleibt unverändert (kein * taperWeeklyFactor)
 
-    // 5) Wochenload summieren + Daten für Mikrozyklus
+    // 5) Wochenprofil aus History lernen (für Tagesziel + Simulation)
+    const HISTORY_WEEKS = 4;
+    const historyStartDate = new Date(mondayDate);
+    historyStartDate.setUTCDate(historyStartDate.getUTCDate() - HISTORY_WEEKS * 7);
+    const historyStartStr = historyStartDate.toISOString().slice(0, 10);
+
+    let weekdayWeights = new Array(7).fill(0); // Mo..So
+    try {
+      const histRes = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${historyStartStr}&newest=${today}&cols=id,ctlLoad`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (histRes.ok) {
+        const histArr = await histRes.json();
+        for (const d of histArr) {
+          if (!d.id || d.ctlLoad == null) continue;
+          const dateObj = new Date(d.id + "T00:00:00Z");
+          if (isNaN(dateObj.getTime())) continue;
+          const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
+          let idx;
+          if (wd === 0) idx = 6; // So -> 6
+          else idx = wd - 1;     // Mo->0, Di->1, ...
+          if (idx >= 0 && idx < 7) {
+            weekdayWeights[idx] += d.ctlLoad;
+          }
+        }
+      } else if (histRes.body) {
+        histRes.body.cancel();
+      }
+    } catch (e) {
+      console.error("Error fetching history for weekday profile:", e);
+    }
+
+    let sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
+    if (sumWeights <= 0) {
+      weekdayWeights = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So Fallback
+      sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
+    }
+
+    // 6) Wochenload summieren + Daten für Mikrozyklus
     let weekLoad = 0;
     let weekArr = [];
 
@@ -586,10 +826,23 @@ async function handle() {
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
 
-    // 6) Tagesziel – aus Woche, Fitness, Form, Taper, Mikrozyklus
+    // 7) Tagesziel – aus Woche, Fitness, Form, Taper, Mikrozyklus
 
-    // a) Wochen-Sicht: TSS pro Trainingstag
-    const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+    // a) Wochen-Sicht: TSS nach Wochentagsmuster
+    let targetFromWeek;
+    {
+      // heutigen Wochentag in Index 0=Mo..6=So umrechnen
+      const jsDay = weekday; // 0=So,1=Mo,...
+      const dayIdx = jsDay === 0 ? 6 : jsDay - 1;
+
+      if (sumWeights > 0 && weekdayWeights[dayIdx] > 0) {
+        const share = weekdayWeights[dayIdx] / sumWeights;
+        targetFromWeek = weeklyTarget * share;
+      } else {
+        // Fallback: gleichmäßige Verteilung auf TRAINING_DAYS_PER_WEEK
+        targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+      }
+    }
 
     // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
     const baseFromFitness = dailyTargetBase * taperDailyFactor;
@@ -632,8 +885,8 @@ async function handle() {
     }
 
     // 3) Load-basiert: sehr hoher TSS gestern → stärker runter
-    const heavyThreshold = Math.max(1.5 * targetFromWeek, 60);       // "hart"
-    const veryHeavyThreshold = Math.max(2.3 * targetFromWeek, 90);   // "sehr hart";
+    const heavyThreshold = Math.max(1.5 * (weeklyTarget / TRAINING_DAYS_PER_WEEK), 60);       // "hart"
+    const veryHeavyThreshold = Math.max(2.3 * (weeklyTarget / TRAINING_DAYS_PER_WEEK), 90);   // "sehr hart";
 
     if (yesterdayLoad >= veryHeavyThreshold && tsb <= -5) {
       fatigueFactor = Math.min(fatigueFactor, 0.4);
@@ -643,7 +896,7 @@ async function handle() {
     }
 
     // 4) Zwei-Tage-Kombi: wenn die letzten 2 Tage zusammen sehr hoch waren
-    const highTwoDayThreshold = Math.max(3.0 * targetFromWeek, 120);
+    const highTwoDayThreshold = Math.max(3.0 * (weeklyTarget / TRAINING_DAYS_PER_WEEK), 120);
 
     if (last2DaysLoad >= highTwoDayThreshold && tsb <= -5) {
       fatigueFactor = Math.min(fatigueFactor, 0.6);
@@ -656,7 +909,7 @@ async function handle() {
 
     // f) Obergrenzen
     const maxDailyByCtl = ctl * 3.0;
-    const maxDailyByWeek = targetFromWeek * 2.5;
+    const maxDailyByWeek = (weeklyTarget / TRAINING_DAYS_PER_WEEK) * 2.5;
     const maxDaily = Math.max(
       baseFromFitness,
       Math.min(maxDailyByCtl, maxDailyByWeek)
@@ -672,16 +925,28 @@ async function handle() {
     const tssLow = Math.round(tssTarget * 0.8);
     const tssHigh = Math.round(tssTarget * 1.2);
 
-    // 7) WochenPlan OHNE Balken (clean)
+    // 8) WochenPlan OHNE Balken (clean)
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // 8) Kommentar mit Balken
+    // Adaptive Ramp-Erklärung bauen
+    const adaptiveRampLine = adaptiveInfo
+      ? `Adaptive Ramp: Wunsch-ΔCTL=${adaptiveInfo.desiredCtlDelta.toFixed(2)}, erlaubt=${adaptiveInfo.ctlRampWindow.minDelta.toFixed(2)} bis ${adaptiveInfo.ctlRampWindow.maxDelta.toFixed(2)}, gesetzt=${adaptiveInfo.clampedCtlDelta.toFixed(2)} (eff. Ramp ${(adaptiveInfo.rampPercentEffective * 100).toFixed(1)}%)`
+      : "Adaptive Ramp: Fallback (zu wenig Historie oder keine Vorwochen-Daten)";
+
+    // 9) Kommentar mit Balken
     const commentText = `Erklärung zum heutigen Trainingsziel:
 
 Wochenziel: ${weeklyTarget} TSS
-Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}
-Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}
+Geplante Trainingstage pro Woche (Fallback): ${TRAINING_DAYS_PER_WEEK}
+Tagesgewicht laut Wochentagsmuster (Mo..So): ${weekdayWeights.map(v => v.toFixed(1)).join(", ")}
+Gewicht heute im Muster: ${
+      (() => {
+        const jsDay = weekday; // 0=So,1=Mo...
+        const idx = jsDay === 0 ? 6 : jsDay - 1;
+        return weekdayWeights[idx].toFixed(1);
+      })()
+    }
 
 Vorwoche:
 Ziel letzte Woche: ${lastWeekTarget != null ? lastWeekTarget.toFixed(0) : "keine Daten"}
@@ -697,6 +962,9 @@ TSB (Form): ${tsb.toFixed(1)}
 Wochentyp: ${weekState}
 Taperphase: ${inTaper ? "Ja" : "Nein"}
 
+Adaptive Logik:
+${adaptiveRampLine}
+
 Mikrozyklus dieser Woche:
 Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}
 Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}
@@ -704,25 +972,25 @@ Gestern geladene TSS (ctlLoad): ${yesterdayLoad.toFixed(1)}
 Vorgestern geladene TSS (ctlLoad): ${twoDaysAgoLoad.toFixed(1)}
 Letzte 2 Tage zusammen: ${last2DaysLoad.toFixed(1)} TSS
 Ruhe-/Belastungs-Empfehlung: ${
-  suggestRestDay
-    ? "Empfehlung: Heute eher Ruhetag oder nur sehr lockere, kurze Einheit."
-    : "Normale Belastung möglich – auf Körpergefühl achten."
-}
+      suggestRestDay
+        ? "Empfehlung: Heute eher Ruhetag oder nur sehr lockere, kurze Einheit."
+        : "Normale Belastung möglich – auf Körpergefühl achten."
+    }
 
 Rechenweg:
-targetFromWeek = ${weeklyTarget} / ${TRAINING_DAYS_PER_WEEK} = ${targetFromWeek.toFixed(1)}
+targetFromWeek (Wochenmuster-basiert) ≈ ${targetFromWeek.toFixed(1)} TSS
 baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${baseFromFitness.toFixed(1)}
 combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}
 tsbFactor = ${tsbFactor}
 microFactor = ${microFactor.toFixed(2)}
 dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}
-maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(targetFromWeek * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}
+maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(weeklyTarget / TRAINING_DAYS_PER_WEEK * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}
 
 Tagesziel: ${tssTarget} TSS
 Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
 `;
 
-    // 9) Wellness heute updaten
+    // 10) Wellness heute updaten
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: tssTarget,
@@ -756,45 +1024,6 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
       );
     } else if (updateRes.body) {
       updateRes.body.cancel();
-    }
-
-    // 10) Wochenprofil aus History lernen (für Simulation)
-
-    const HISTORY_WEEKS = 4;
-    const historyStartDate = new Date(mondayDate);
-    historyStartDate.setUTCDate(historyStartDate.getUTCDate() - HISTORY_WEEKS * 7);
-    const historyStartStr = historyStartDate.toISOString().slice(0, 10);
-
-    let weekdayWeights = new Array(7).fill(0); // Mo..So
-    try {
-      const histRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${historyStartStr}&newest=${today}&cols=id,ctlLoad`,
-        { headers: { Authorization: authHeader } }
-      );
-      if (histRes.ok) {
-        const histArr = await histRes.json();
-        for (const d of histArr) {
-          if (!d.id || d.ctlLoad == null) continue;
-          const dateObj = new Date(d.id + "T00:00:00Z");
-          if (isNaN(dateObj.getTime())) continue;
-          const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
-          let idx;
-          if (wd === 0) idx = 6; // So -> 6
-          else idx = wd - 1;     // Mo->0, Di->1, ...
-          if (idx >= 0 && idx < 7) {
-            weekdayWeights[idx] += d.ctlLoad;
-          }
-        }
-      } else if (histRes.body) {
-        histRes.body.cancel();
-      }
-    } catch (e) {
-      console.error("Error fetching history for weekday profile:", e);
-    }
-
-    const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
-    if (sumWeights <= 0) {
-      weekdayWeights = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So
     }
 
     // 11) Zukünftige Wochen planen
