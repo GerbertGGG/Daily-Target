@@ -321,4 +321,7 @@ function computeDailyTarget(ctl, atl) {
   const base = 1.0;
   const k = 0.05;
   const tsb = ctl - atl;
-  const tsbClamped = Math.max(-20, Math.min
+  const tsbClamped = Math.max(-20, Math.min(20, tsb));
+  const dailyTss = ctl * (base + k * tsbClamped);
+  return Math.round(Math.max(0, Math.min(dailyTss, ctl * 1.5)));
+}
