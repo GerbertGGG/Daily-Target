@@ -371,7 +371,7 @@ async function handle() {
       atlMon = atl;
     }
 
-    // 2b) Vorwochen-Ziel und -Ergebnis für Anti-Rückschritt-Logik
+    // 2b) Vorwochen-Ziel und -Ergebnis für Steigerungs-/Anti-Rückschritt-Logik
     let lastWeekTarget = null;
     let lastWeekActual = null;
 
@@ -425,17 +425,29 @@ async function handle() {
       // Erstes Mal diese Woche: aus CTL/ATL und weekState berechnen
       let weeklyTargetRaw = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
 
-      // Anti-Rückschritt-Logik:
+      // Steigerungs-/Anti-Rückschritt-Logik:
       // Wenn letzte Woche Ziel weitgehend erreicht und du nicht "Müde" bist,
-      // nicht deutlich unter Vorwoche fallen lassen.
+      // dann i.d.R. nicht runtergehen und ggf. sogar leicht steigern.
       const hitLastWeek =
         lastWeekTarget != null &&
         lastWeekActual != null &&
-        lastWeekActual >= 0.9 * lastWeekTarget;
+        lastWeekActual >= 0.95 * lastWeekTarget; // ≥95% des Ziels
 
       if (hitLastWeek && weekState !== "Müde") {
-        const minAllowed = Math.round(lastWeekTarget * 0.95); // max ca. -5%
-        weeklyTargetRaw = Math.max(weeklyTargetRaw, minAllowed);
+        // niemals unter Vorwoche
+        let minAllowed = lastWeekTarget;
+
+        // Wenn du aktuell eher frisch bist (TSB >= 0),
+        // leicht steigern:
+        // - Normal: ca. +5%
+        // - Erholt: ca. +10%
+        if (tsb >= 0) {
+          const progFactor = (weekState === "Erholt") ? 1.10 : 1.05;
+          const progressive = lastWeekTarget * progFactor;
+          minAllowed = Math.max(minAllowed, progressive);
+        }
+
+        weeklyTargetRaw = Math.max(weeklyTargetRaw, Math.round(minAllowed));
       }
 
       weeklyTarget = weeklyTargetRaw;
@@ -749,7 +761,6 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
 
     // 10) Wochenprofil aus History lernen (für Simulation)
 
-    // Wir schauen z.B. 4 Wochen in die Vergangenheit
     const HISTORY_WEEKS = 4;
     const historyStartDate = new Date(mondayDate);
     historyStartDate.setUTCDate(historyStartDate.getUTCDate() - HISTORY_WEEKS * 7);
@@ -782,7 +793,6 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
       console.error("Error fetching history for weekday profile:", e);
     }
 
-    // Wenn keine sinnvollen Daten → später Default-Muster in simulatePlannedWeeks
     const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
     if (sumWeights <= 0) {
       weekdayWeights = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So
