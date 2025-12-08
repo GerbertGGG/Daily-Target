@@ -1,6 +1,6 @@
-
 const BASE_URL = "https://intervals.icu/api/v1";
-// 🔥 Hardcoded Variablen – HIER deine Werte eintragen!
+
+// 🔥 Hardcoded Variablen – später ideal als Secrets/KV hinterlegen
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 const INTERVALS_TARGET_FIELD = "TageszielTSS";
@@ -8,7 +8,7 @@ const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 
-// realistische Anzahl Trainingstage pro Woche (Fallback)
+// Fallback: angenommene Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
 // Taper-Konstanten
@@ -16,6 +16,13 @@ const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
 const TAPER_DAILY_START = 0.8;
 const TAPER_DAILY_END = 0.3;
+
+// KV-Key für das Muster
+const WEEKDAY_PATTERN_KEY = "weekdayPatternRaw";
+
+// Lernrate für das exponentielle Lernen (0.0–1.0)
+// 0.9 = viel Gedächtnis, neue Daten haben 10% Gewicht
+const PATTERN_ALPHA = 0.9;
 
 // ---------------------------------------------------------
 // Adaptive Ramp – Hilfsfunktionen
@@ -191,7 +198,110 @@ function computeNextWeekTargetAdaptive({
 }
 
 // ---------------------------------------------------------
-// Hilfsfunktionen
+// Lernendes Wochentagsmuster (KV)
+// ---------------------------------------------------------
+
+function normalizePattern(rawPattern) {
+  let sum = rawPattern.reduce((a, b) => a + b, 0);
+  if (sum <= 0) {
+    // Fallback-Muster: Di/Do/Sa/So Hauptlast
+    rawPattern = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7];
+    sum = rawPattern.reduce((a, b) => a + b, 0);
+  }
+  return rawPattern.map((v) => (sum > 0 ? v / sum : 0));
+}
+
+// Initialisierung des Musters aus der History (z.B. letzte 12 Wochen)
+async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDate) {
+  const HISTORY_WEEKS_INIT = 12;
+  const startDate = new Date(todayDate);
+  startDate.setUTCDate(startDate.getUTCDate() - HISTORY_WEEKS_INIT * 7);
+  const oldest = startDate.toISOString().slice(0, 10);
+  const newest = todayDate.toISOString().slice(0, 10);
+
+  let rawPattern = new Array(7).fill(0); // Mo..So
+
+  try {
+    const histRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${oldest}&newest=${newest}&cols=id,ctlLoad`,
+      { headers: { Authorization: authHeader } }
+    );
+    if (histRes.ok) {
+      const histArr = await histRes.json();
+      for (const d of histArr) {
+        if (!d.id || d.ctlLoad == null) continue;
+        const dateObj = new Date(d.id + "T00:00:00Z");
+        if (isNaN(dateObj.getTime())) continue;
+        const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
+        let idx;
+        if (wd === 0) idx = 6; // So -> 6
+        else idx = wd - 1;     // Mo->0, Di->1, ...
+        if (idx >= 0 && idx < 7) {
+          rawPattern[idx] += d.ctlLoad;
+        }
+      }
+    } else if (histRes.body) {
+      histRes.body.cancel();
+    }
+  } catch (e) {
+    console.error("Error in initWeekdayPatternFromHistory:", e);
+  }
+
+  // Falls gar nichts drin ist → Fallback
+  let sum = rawPattern.reduce((a, b) => a + b, 0);
+  if (sum <= 0) {
+    rawPattern = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7];
+  }
+
+  await env.WEEKDAY_PATTERN.put(WEEKDAY_PATTERN_KEY, JSON.stringify(rawPattern));
+  return rawPattern;
+}
+
+// Muster aus KV holen oder initialisieren
+async function loadRawPattern(env, athleteId, authHeader, todayDate) {
+  let rawStr = await env.WEEKDAY_PATTERN.get(WEEKDAY_PATTERN_KEY);
+  if (!rawStr) {
+    // erstmalig: aus History initialisieren
+    return await initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDate);
+  }
+  try {
+    const arr = JSON.parse(rawStr);
+    if (Array.isArray(arr) && arr.length === 7) {
+      return arr.map((v) => (typeof v === "number" && isFinite(v) ? v : 0));
+    }
+  } catch (e) {
+    console.error("Error parsing weekdayPatternRaw from KV:", e);
+  }
+  // Fallback, wenn KV kaputt
+  const rawPattern = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7];
+  await env.WEEKDAY_PATTERN.put(WEEKDAY_PATTERN_KEY, JSON.stringify(rawPattern));
+  return rawPattern;
+}
+
+// Muster mit gestrigem Load updaten (Exponentielles Lernen)
+async function updatePatternWithYesterday(env, rawPattern, yesterdayDate, yesterdayLoad) {
+  if (!yesterdayDate || yesterdayLoad == null) {
+    return rawPattern;
+  }
+  const d = yesterdayDate;
+  const wd = d.getUTCDay(); // 0=So,1=Mo...
+  let idx;
+  if (wd === 0) idx = 6; // So -> 6
+  else idx = wd - 1;     // Mo->0, Di->1, ...
+
+  if (idx >= 0 && idx < 7) {
+    const old = rawPattern[idx] ?? 0;
+    const load = Math.max(0, yesterdayLoad);
+    const updated = PATTERN_ALPHA * old + (1 - PATTERN_ALPHA) * load;
+    rawPattern[idx] = updated;
+  }
+
+  await env.WEEKDAY_PATTERN.put(WEEKDAY_PATTERN_KEY, JSON.stringify(rawPattern));
+  return rawPattern;
+}
+
+// ---------------------------------------------------------
+// Hilfsfunktionen Training / Müdigkeit / Taper
 // ---------------------------------------------------------
 
 function computeDailyTarget(ctl, atl) {
@@ -210,15 +320,15 @@ function classifyWeek(ctl, atl, rampRate) {
   // 1) Dynamischer TSB-Schwellenwert abhängig vom CTL
   let tsbCritical;
   if (ctl < 50) {
-    tsbCritical = -5;   // wenig Trainingsbasis → früher müde
+    tsbCritical = -5;
   } else if (ctl < 80) {
-    tsbCritical = -10;  // „normaler“ Bereich
+    tsbCritical = -10;
   } else {
-    tsbCritical = -15;  // sehr fit → mehr Negativ-TSB tolerierbar
+    tsbCritical = -15;
   }
   const isTsbTired = tsb <= tsbCritical;
 
-  // 2) ATL/CTL-Ratio statt fixer +5
+  // 2) ATL/CTL-Ratio
   let atlCtlRatio = Infinity;
   if (ctl > 0) {
     atlCtlRatio = atl / ctl;
@@ -365,14 +475,12 @@ async function simulatePlannedWeeks(
   const tauCtl = 42;
   const tauAtl = 7;
 
-  // Fallback-Muster, falls keine History: Di/Do/Sa/So belastet
   let pattern = Array.isArray(weekdayWeights) && weekdayWeights.length === 7
     ? weekdayWeights.slice()
     : [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So
 
   let patternSum = pattern.reduce((a, b) => a + b, 0);
   if (patternSum <= 0) {
-    // absolute Fallback: gleichmäßig
     pattern = [1, 1, 1, 1, 1, 1, 1];
     patternSum = 7;
   }
@@ -470,7 +578,7 @@ async function simulatePlannedWeeks(
 // HAUPTLOGIK
 // ---------------------------------------------------------
 
-async function handle() {
+async function handle(env) {
   const apiKey = INTERVALS_API_KEY;
   const athleteId = INTERVALS_ATHLETE_ID;
 
@@ -655,7 +763,6 @@ async function handle() {
 
     // 4) Event & Taper – wirkt nur auf Tagesziel, NICHT aufs Wochenziel
     let taperDailyFactor = 1.0;
-    let taperWeeklyFactor = 1.0; // evtl. für Simulation
     let inTaper = false;
 
     try {
@@ -681,12 +788,6 @@ async function handle() {
             TAPER_DAILY_START +
             (TAPER_DAILY_END - TAPER_DAILY_START) * progress;
 
-          const TAPER_WEEKLY_START = 0.9;
-          const TAPER_WEEKLY_END = 0.6;
-          taperWeeklyFactor =
-            TAPER_WEEKLY_START +
-            (TAPER_WEEKLY_END - TAPER_WEEKLY_START) * progress;
-
           inTaper = true;
         }
       }
@@ -694,48 +795,9 @@ async function handle() {
       console.error("Error in event/taper logic:", e);
     }
 
-    // weeklyTarget bleibt unverändert (kein * taperWeeklyFactor)
+    // weeklyTarget bleibt unverändert
 
-    // 5) Wochenprofil aus History lernen (für Tagesziel + Simulation)
-    const HISTORY_WEEKS = 4;
-    const historyStartDate = new Date(mondayDate);
-    historyStartDate.setUTCDate(historyStartDate.getUTCDate() - HISTORY_WEEKS * 7);
-    const historyStartStr = historyStartDate.toISOString().slice(0, 10);
-
-    let weekdayWeights = new Array(7).fill(0); // Mo..So
-    try {
-      const histRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${historyStartStr}&newest=${today}&cols=id,ctlLoad`,
-        { headers: { Authorization: authHeader } }
-      );
-      if (histRes.ok) {
-        const histArr = await histRes.json();
-        for (const d of histArr) {
-          if (!d.id || d.ctlLoad == null) continue;
-          const dateObj = new Date(d.id + "T00:00:00Z");
-          if (isNaN(dateObj.getTime())) continue;
-          const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
-          let idx;
-          if (wd === 0) idx = 6; // So -> 6
-          else idx = wd - 1;     // Mo->0, Di->1, ...
-          if (idx >= 0 && idx < 7) {
-            weekdayWeights[idx] += d.ctlLoad;
-          }
-        }
-      } else if (histRes.body) {
-        histRes.body.cancel();
-      }
-    } catch (e) {
-      console.error("Error fetching history for weekday profile:", e);
-    }
-
-    let sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
-    if (sumWeights <= 0) {
-      weekdayWeights = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So Fallback
-      sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
-    }
-
-    // 6) Wochenload summieren + Daten für Mikrozyklus
+    // 5) Wochenload summieren + Daten für Mikrozyklus
     let weekLoad = 0;
     let weekArr = [];
 
@@ -753,11 +815,8 @@ async function handle() {
         weekRes.body.cancel();
       }
     }
-    // Montag: weekLoad = 0 → Rest = Wochenziel
 
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
-
-    // Wochenfortschritt für Kommentar (nur dort Balken)
     const weekDone = Math.max(0, Math.min(weeklyTarget, weekLoad));
 
     let weekPercent = 0;
@@ -771,7 +830,6 @@ async function handle() {
       weekBarFilled = Math.round((weekDone / weeklyTarget) * 10);
     }
     weekBarFilled = Math.max(0, Math.min(10, weekBarFilled));
-
     const weekBar = "█".repeat(weekBarFilled) + "░".repeat(10 - weekBarFilled);
 
     const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -826,17 +884,22 @@ async function handle() {
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
 
+    // 6) Lernendes Wochenmuster: loadRawPattern + Update mit gestern
+    let rawPattern = await loadRawPattern(env, athleteId, authHeader, todayDate);
+    rawPattern = await updatePatternWithYesterday(env, rawPattern, yesterdayDate, yesterdayLoad);
+    const weekdayWeights = normalizePattern(rawPattern);
+
     // 7) Tagesziel – aus Woche, Fitness, Form, Taper, Mikrozyklus
 
     // a) Wochen-Sicht: TSS nach Wochentagsmuster
     let targetFromWeek;
     {
-      // heutigen Wochentag in Index 0=Mo..6=So umrechnen
       const jsDay = weekday; // 0=So,1=Mo,...
       const dayIdx = jsDay === 0 ? 6 : jsDay - 1;
-
-      if (sumWeights > 0 && weekdayWeights[dayIdx] > 0) {
-        const share = weekdayWeights[dayIdx] / sumWeights;
+      const weightToday = weekdayWeights[dayIdx] ?? 0;
+      const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
+      if (sumWeights > 0 && weightToday > 0) {
+        const share = weightToday; // schon normiert
         targetFromWeek = weeklyTarget * share;
       } else {
         // Fallback: gleichmäßige Verteilung auf TRAINING_DAYS_PER_WEEK
@@ -847,8 +910,8 @@ async function handle() {
     // b) Fitness-Sicht (CTL/ATL/TSB + Taper)
     const baseFromFitness = dailyTargetBase * taperDailyFactor;
 
-    // c) Kombination: eher Wochenziel-getrieben
-    const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
+    // c) Kombination: eher Wochenziel-getrieben, aber Fitness stärker berücksichtigen als früher
+    const combinedBase = 0.7 * targetFromWeek + 0.3 * baseFromFitness;
 
     // d) Form-Faktor (TSB)
     let tsbFactor = 1.0;
@@ -885,8 +948,9 @@ async function handle() {
     }
 
     // 3) Load-basiert: sehr hoher TSS gestern → stärker runter
-    const heavyThreshold = Math.max(1.5 * (weeklyTarget / TRAINING_DAYS_PER_WEEK), 60);       // "hart"
-    const veryHeavyThreshold = Math.max(2.3 * (weeklyTarget / TRAINING_DAYS_PER_WEEK), 90);   // "sehr hart";
+    const avgTrainingDay = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+    const heavyThreshold = Math.max(1.5 * avgTrainingDay, 60);
+    const veryHeavyThreshold = Math.max(2.3 * avgTrainingDay, 90);
 
     if (yesterdayLoad >= veryHeavyThreshold && tsb <= -5) {
       fatigueFactor = Math.min(fatigueFactor, 0.4);
@@ -896,7 +960,7 @@ async function handle() {
     }
 
     // 4) Zwei-Tage-Kombi: wenn die letzten 2 Tage zusammen sehr hoch waren
-    const highTwoDayThreshold = Math.max(3.0 * (weeklyTarget / TRAINING_DAYS_PER_WEEK), 120);
+    const highTwoDayThreshold = Math.max(3.0 * avgTrainingDay, 120);
 
     if (last2DaysLoad >= highTwoDayThreshold && tsb <= -5) {
       fatigueFactor = Math.min(fatigueFactor, 0.6);
@@ -909,16 +973,19 @@ async function handle() {
 
     // f) Obergrenzen
     const maxDailyByCtl = ctl * 3.0;
-    const maxDailyByWeek = (weeklyTarget / TRAINING_DAYS_PER_WEEK) * 2.5;
+    const maxDailyByWeek = avgTrainingDay * 2.5;
     const maxDaily = Math.max(
       baseFromFitness,
       Math.min(maxDailyByCtl, maxDailyByWeek)
     );
 
     dailyTargetRaw = Math.max(0, dailyTargetRaw);
-    const dailyTarget = Math.round(Math.min(dailyTargetRaw, maxDaily));
+    let dailyTarget = Math.round(Math.min(dailyTargetRaw, maxDaily));
 
-    // Single-TSS-Target (kein Sportsplit)
+    // Optionales Minimum, damit Trainingstage nicht zu mickrig werden
+    const minDaily = Math.min(30, weeklyTarget); // bei CTL ~20: ~30 TSS Minimum
+    dailyTarget = Math.max(minDaily, dailyTarget);
+
     const tssTarget = dailyTarget;
 
     // Range 80–120 %
@@ -929,7 +996,6 @@ async function handle() {
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    // Adaptive Ramp-Erklärung bauen
     const adaptiveRampLine = adaptiveInfo
       ? `Adaptive Ramp: Wunsch-ΔCTL=${adaptiveInfo.desiredCtlDelta.toFixed(2)}, erlaubt=${adaptiveInfo.ctlRampWindow.minDelta.toFixed(2)} bis ${adaptiveInfo.ctlRampWindow.maxDelta.toFixed(2)}, gesetzt=${adaptiveInfo.clampedCtlDelta.toFixed(2)} (eff. Ramp ${(adaptiveInfo.rampPercentEffective * 100).toFixed(1)}%)`
       : "Adaptive Ramp: Fallback (zu wenig Historie oder keine Vorwochen-Daten)";
@@ -939,14 +1005,9 @@ async function handle() {
 
 Wochenziel: ${weeklyTarget} TSS
 Geplante Trainingstage pro Woche (Fallback): ${TRAINING_DAYS_PER_WEEK}
-Tagesgewicht laut Wochentagsmuster (Mo..So): ${weekdayWeights.map(v => v.toFixed(1)).join(", ")}
-Gewicht heute im Muster: ${
-      (() => {
-        const jsDay = weekday; // 0=So,1=Mo...
-        const idx = jsDay === 0 ? 6 : jsDay - 1;
-        return weekdayWeights[idx].toFixed(1);
-      })()
-    }
+
+Lernendes Wochentagsmuster (Mo..So, normiert):
+${weekdayWeights.map(v => v.toFixed(3)).join(" / ")}
 
 Vorwoche:
 Ziel letzte Woche: ${lastWeekTarget != null ? lastWeekTarget.toFixed(0) : "keine Daten"}
@@ -978,13 +1039,14 @@ Ruhe-/Belastungs-Empfehlung: ${
     }
 
 Rechenweg:
-targetFromWeek (Wochenmuster-basiert) ≈ ${targetFromWeek.toFixed(1)} TSS
+targetFromWeek (Muster-basiert) ≈ ${targetFromWeek.toFixed(1)} TSS
 baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${baseFromFitness.toFixed(1)}
-combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}
+combinedBase = 0.7 * ${targetFromWeek.toFixed(1)} + 0.3 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}
 tsbFactor = ${tsbFactor}
 microFactor = ${microFactor.toFixed(2)}
 dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}
-maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(weeklyTarget / TRAINING_DAYS_PER_WEEK * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}
+maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(avgTrainingDay * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}
+minDaily (Sicherheitsuntergrenze) = ${minDaily.toFixed(1)}
 
 Tagesziel: ${tssTarget} TSS
 Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
@@ -1000,7 +1062,6 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
     };
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
-      // Nur setzen, wenn diese Woche noch kein Wochenziel im Montag-Wellness vorhanden war
       payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
     }
 
@@ -1026,7 +1087,7 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
       updateRes.body.cancel();
     }
 
-    // 11) Zukünftige Wochen planen
+    // 11) Zukünftige Wochen planen (mit gleichem Muster)
     const WEEKS_TO_SIMULATE = 7;
     await simulatePlannedWeeks(
       ctlMon,
@@ -1060,9 +1121,9 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
 
 export default {
   async fetch(request, env, ctx) {
-    return handle();
+    return handle(env);
   },
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handle());
+    ctx.waitUntil(handle(env));
   }
 };
