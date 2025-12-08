@@ -175,7 +175,7 @@ function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
   return chosen;
 }
 
-// Zukunfts-Wochen simulieren
+// Zukunfts-Wochen simulieren – jetzt mit Wochenprofil (weekdayWeights)
 async function simulatePlannedWeeks(
   ctlMon0,
   atlMon0,
@@ -186,10 +186,23 @@ async function simulatePlannedWeeks(
   authHeader,
   athleteId,
   planField,
-  weeklyTargetField
+  weeklyTargetField,
+  weekdayWeights
 ) {
   const tauCtl = 42;
   const tauAtl = 7;
+
+  // Fallback-Muster, falls keine History: Di/Do/Sa/So belastet
+  let pattern = Array.isArray(weekdayWeights) && weekdayWeights.length === 7
+    ? weekdayWeights.slice()
+    : [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So
+
+  let patternSum = pattern.reduce((a, b) => a + b, 0);
+  if (patternSum <= 0) {
+    // absolute Fallback: gleichmäßig
+    pattern = [1, 1, 1, 1, 1, 1, 1];
+    patternSum = 7;
+  }
 
   let ctlStart = ctlMon0;
   let atlStart = atlMon0;
@@ -197,13 +210,16 @@ async function simulatePlannedWeeks(
   let prevState = weekState0;
 
   for (let w = 1; w < weeksToSim; w++) {
-    const dailyLoad = prevTarget / 7;
     let ctl = ctlStart;
     let atl = atlStart;
 
+    // 7 Tage mit Verteilungsprofil simulieren
     for (let d = 0; d < 7; d++) {
-      ctl = ctl + (dailyLoad - ctl) / tauCtl;
-      atl = atl + (dailyLoad - atl) / tauAtl;
+      const share = pattern[d] ?? 0;
+      const load = patternSum > 0 ? (prevTarget * (share / patternSum)) : (prevTarget / 7);
+
+      ctl = ctl + (load - ctl) / tauCtl;
+      atl = atl + (load - atl) / tauAtl;
     }
 
     const ctlEnd = ctl;
@@ -731,7 +747,48 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
       updateRes.body.cancel();
     }
 
-    // 10) Zukünftige Wochen planen
+    // 10) Wochenprofil aus History lernen (für Simulation)
+
+    // Wir schauen z.B. 4 Wochen in die Vergangenheit
+    const HISTORY_WEEKS = 4;
+    const historyStartDate = new Date(mondayDate);
+    historyStartDate.setUTCDate(historyStartDate.getUTCDate() - HISTORY_WEEKS * 7);
+    const historyStartStr = historyStartDate.toISOString().slice(0, 10);
+
+    let weekdayWeights = new Array(7).fill(0); // Mo..So
+    try {
+      const histRes = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${historyStartStr}&newest=${today}&cols=id,ctlLoad`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (histRes.ok) {
+        const histArr = await histRes.json();
+        for (const d of histArr) {
+          if (!d.id || d.ctlLoad == null) continue;
+          const dateObj = new Date(d.id + "T00:00:00Z");
+          if (isNaN(dateObj.getTime())) continue;
+          const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
+          let idx;
+          if (wd === 0) idx = 6; // So -> 6
+          else idx = wd - 1;     // Mo->0, Di->1, ...
+          if (idx >= 0 && idx < 7) {
+            weekdayWeights[idx] += d.ctlLoad;
+          }
+        }
+      } else if (histRes.body) {
+        histRes.body.cancel();
+      }
+    } catch (e) {
+      console.error("Error fetching history for weekday profile:", e);
+    }
+
+    // Wenn keine sinnvollen Daten → später Default-Muster in simulatePlannedWeeks
+    const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
+    if (sumWeights <= 0) {
+      weekdayWeights = [0.0, 1.0, 0.0, 1.0, 0.0, 1.3, 0.7]; // Mo..So
+    }
+
+    // 11) Zukünftige Wochen planen
     const WEEKS_TO_SIMULATE = 7;
     await simulatePlannedWeeks(
       ctlMon,
@@ -743,7 +800,8 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
       authHeader,
       athleteId,
       INTERVALS_PLAN_FIELD,
-      WEEKLY_TARGET_FIELD
+      WEEKLY_TARGET_FIELD,
+      weekdayWeights
     );
 
     return new Response(
