@@ -557,11 +557,26 @@ async function handle(env) {
     rawPattern = await updatePatternWithYesterday(env, rawPattern, yesterdayDate, yesterdayLoad);
     const weekdayWeights = normalizePattern(rawPattern);
 
-    // 7) Tagesziel
-    const targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
-    const baseFromFitness = dailyTargetBase * taperDailyFactor;
-    const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
+    // 7) 
+// 7) Tagesziel – jetzt mit lernender Wochenverteilung
+let targetFromWeek;
+{
+  const jsDay = weekday;              // 0 = So, 1 = Mo, ...
+  const dayIdx = jsDay === 0 ? 6 : jsDay - 1; // Mo..So = 0..6
+  const weightToday = weekdayWeights[dayIdx] ?? 0;
+  const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
 
+  if (sumWeights > 0 && weightToday > 0) {
+    // Musterbasiert: Anteil dieser Wochentag-Last an der Wochenlast
+    targetFromWeek = weeklyTarget * weightToday;
+  } else {
+    // Fallback: „klassisch“ über angenommene Trainingstage
+    targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+  }
+}
+
+const baseFromFitness = dailyTargetBase * taperDailyFactor;
+const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
     let tsbFactor = 1.0;
     if (tsb >= 10) tsbFactor = 1.4;
     else if (tsb >= 5) tsbFactor = 1.25;
