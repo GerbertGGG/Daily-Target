@@ -10,11 +10,16 @@ const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 
 // realistische Anzahl Trainingstage pro Woche
 const TRAINING_DAYS_PER_WEEK = 4.0;
+
 // Taper-Konstanten
 const TAPER_MIN_DAYS = 3;
 const TAPER_MAX_DAYS = 21;
 const TAPER_DAILY_START = 0.8;
 const TAPER_DAILY_END = 0.3;
+
+// ---------------------------------------------------------
+// Hilfsfunktionen
+// ---------------------------------------------------------
 
 function computeDailyTarget(ctl, atl) {
   const base = 1.0;
@@ -25,6 +30,7 @@ function computeDailyTarget(ctl, atl) {
   return Math.round(Math.max(0, Math.min(dailyTss, ctl * 1.5)));
 }
 
+// Dynamische Müdigkeitslogik
 function classifyWeek(ctl, atl, rampRate) {
   const tsb = ctl - atl;
 
@@ -47,15 +53,15 @@ function classifyWeek(ctl, atl, rampRate) {
 
   let atlRatioThreshold;
   if (ctl < 50) {
-    atlRatioThreshold = 1.2;  // empfindlicher bei niedriger Fitness
+    atlRatioThreshold = 1.2;
   } else if (ctl < 80) {
     atlRatioThreshold = 1.3;
   } else {
-    atlRatioThreshold = 1.4;  // bei hoher Fitness darf ATL relativ höher sein
+    atlRatioThreshold = 1.4;
   }
   const isAtlHigh = atlCtlRatio >= atlRatioThreshold;
 
-  // 3) Ramp-Rate wie gehabt
+  // 3) Ramp-Rate
   const isRampHigh = rampRate >= 1.0;
   const isRampLowAndFresh = rampRate <= -0.5 && tsb >= -5;
 
@@ -70,7 +76,6 @@ function classifyWeek(ctl, atl, rampRate) {
 
   return { state: "Normal", tsb };
 }
-
 
 function stateEmoji(state) {
   if (state === "Erholt") return "🔥";
@@ -296,6 +301,14 @@ async function handle() {
   mondayDate.setUTCDate(mondayDate.getUTCDate() - offset);
   const mondayStr = mondayDate.toISOString().slice(0, 10);
 
+  // Letzte Woche (für Zielvergleich)
+  const lastMondayDate = new Date(mondayDate);
+  lastMondayDate.setUTCDate(lastMondayDate.getUTCDate() - 7);
+  const lastSundayDate = new Date(mondayDate);
+  lastSundayDate.setUTCDate(lastSundayDate.getUTCDate() - 1);
+  const lastMondayStr = lastMondayDate.toISOString().slice(0, 10);
+  const lastSundayStr = lastSundayDate.toISOString().slice(0, 10);
+
   try {
     // 1) Wellness heute
     const wellnessRes = await fetch(
@@ -319,10 +332,10 @@ async function handle() {
       return new Response("No ctl/atl data", { status: 200 });
     }
 
-    const tsb = ctl - atl;
+    const { state: weekState, tsb } = classifyWeek(ctl, atl, rampRate);
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
-    // 2) Montag-Werte
+    // 2) Montag-Werte (ctl/atl am Wochenanfang + evtl. existierendes Wochenziel)
     const mondayWellnessRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
       { headers: { Authorization: authHeader } }
@@ -342,26 +355,79 @@ async function handle() {
       atlMon = atl;
     }
 
-    // 3) Wochenzustand
-    const { state: weekState } = classifyWeek(ctl, atl, rampRate);
+    // 2b) Vorwochen-Ziel und -Ergebnis für Anti-Rückschritt-Logik
+    let lastWeekTarget = null;
+    let lastWeekActual = null;
 
+    // Wochenziel letzte Woche holen (aus Montag der Vorwoche)
+    try {
+      const lastMonWellRes = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness/${lastMondayStr}`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (lastMonWellRes.ok) {
+        const lastMonWell = await lastMonWellRes.json();
+        lastWeekTarget = lastMonWell[WEEKLY_TARGET_FIELD] ?? null;
+      } else if (lastMonWellRes.body) {
+        lastMonWellRes.body.cancel();
+      }
+    } catch (e) {
+      console.error("Error fetching last Monday wellness:", e);
+    }
+
+    // Tatsächliche TSS letzte Woche (Summe ctlLoad)
+    try {
+      const lastWeekRes = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${lastMondayStr}&newest=${lastSundayStr}&cols=id,ctlLoad`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (lastWeekRes.ok) {
+        const lastWeekArr = await lastWeekRes.json();
+        let sum = 0;
+        for (const d of lastWeekArr) {
+          if (d.ctlLoad != null) sum += d.ctlLoad;
+        }
+        lastWeekActual = sum;
+      } else if (lastWeekRes.body) {
+        lastWeekRes.body.cancel();
+      }
+    } catch (e) {
+      console.error("Error fetching last week load:", e);
+    }
+
+    // 3) Wochenzustand → Faktor
     let factor = 7;
     if (weekState === "Erholt") factor = 8;
     if (weekState === "Müde") factor = 5.5;
 
-    // 3b) Wochenziel – nur Montag neu/aktualisiert
+    // 3b) Wochenziel – nur setzen, wenn noch keins existiert
     let weeklyTarget;
-    if (today === mondayStr) {
-      weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
-    } else if (mondayWeeklyTarget != null) {
+    if (mondayWeeklyTarget != null) {
+      // Es existiert bereits ein Wochenziel → dieses verwenden
       weeklyTarget = mondayWeeklyTarget;
     } else {
-      weeklyTarget = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+      // Erstes Mal diese Woche: aus CTL/ATL und weekState berechnen
+      let weeklyTargetRaw = Math.round(computeDailyTarget(ctlMon, atlMon) * factor);
+
+      // Anti-Rückschritt-Logik:
+      // Wenn letzte Woche Ziel weitgehend erreicht und du nicht "Müde" bist,
+      // nicht deutlich unter Vorwoche fallen lassen.
+      const hitLastWeek =
+        lastWeekTarget != null &&
+        lastWeekActual != null &&
+        lastWeekActual >= 0.9 * lastWeekTarget;
+
+      if (hitLastWeek && weekState !== "Müde") {
+        const minAllowed = Math.round(lastWeekTarget * 0.95); // max ca. -5%
+        weeklyTargetRaw = Math.max(weeklyTargetRaw, minAllowed);
+      }
+
+      weeklyTarget = weeklyTargetRaw;
     }
 
     // 4) Event & Taper – wirkt nur auf Tagesziel, NICHT aufs Wochenziel
     let taperDailyFactor = 1.0;
-    let taperWeeklyFactor = 1.0; // nur für Simulation / spätere Nutzung
+    let taperWeeklyFactor = 1.0; // evtl. für Simulation
     let inTaper = false;
 
     try {
@@ -405,18 +471,22 @@ async function handle() {
     // 5) Wochenload summieren + Daten für Mikrozyklus
     let weekLoad = 0;
     let weekArr = [];
-    const weekRes = await fetch(
-      `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
-      { headers: { Authorization: authHeader } }
-    );
-    if (weekRes.ok) {
-      weekArr = await weekRes.json();
-      for (const day of weekArr) {
-        if (day.ctlLoad != null) weekLoad += day.ctlLoad;
+
+    if (today !== mondayStr) {
+      const weekRes = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (weekRes.ok) {
+        weekArr = await weekRes.json();
+        for (const day of weekArr) {
+          if (day.ctlLoad != null) weekLoad += day.ctlLoad;
+        }
+      } else if (weekRes.body) {
+        weekRes.body.cancel();
       }
-    } else if (weekRes.body) {
-      weekRes.body.cancel();
     }
+    // Montag: weekLoad = 0 → Rest = Wochenziel
 
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
 
@@ -586,6 +656,10 @@ Wochenziel: ${weeklyTarget} TSS
 Geplante Trainingstage pro Woche: ${TRAINING_DAYS_PER_WEEK}
 Geschätzte TSS pro Trainingstag: ca. ${targetFromWeek.toFixed(1)}
 
+Vorwoche:
+Ziel letzte Woche: ${lastWeekTarget != null ? lastWeekTarget.toFixed(0) : "keine Daten"}
+Ist letzte Woche: ${lastWeekActual != null ? lastWeekActual.toFixed(1) : "keine Daten"}
+
 Wochenfortschritt:
 [${weekBar}] ${weekPercent}% der Wochenlast erledigt (TSS: ${weekLoad.toFixed(1)}/${weeklyTarget})
 
@@ -593,6 +667,7 @@ Aktuelle Fitness und Form:
 CTL: ${ctl.toFixed(1)}
 ATL: ${atl.toFixed(1)}
 TSB (Form): ${tsb.toFixed(1)}
+Wochentyp: ${weekState}
 Taperphase: ${inTaper ? "Ja" : "Nein"}
 
 Mikrozyklus dieser Woche:
@@ -629,7 +704,8 @@ Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
       // DAILY_TYPE_FIELD wird absichtlich NICHT gesetzt
     };
 
-    if (today === mondayStr) {
+    if (today === mondayStr && mondayWeeklyTarget == null) {
+      // Nur setzen, wenn diese Woche noch kein Wochenziel im Montag-Wellness vorhanden war
       payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
     }
 
