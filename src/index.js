@@ -109,7 +109,7 @@ function classifyWeek(ctl, atl, rampRate) {
 }
 
 // ---------------------------------------------------------
-// 6-Wochen-Simulation
+// 6-Wochen-Simulation (liefert geplante Wochenziele zurück)
 // ---------------------------------------------------------
 
 async function simulatePlannedWeeks(
@@ -128,8 +128,6 @@ async function simulatePlannedWeeks(
   const tauAtl = 7;
 
   // Trainingsmuster aus Plan (bool[7]) → Gewichte pro Tag
-  // Nur Tage mit planSelected[i] = true erhalten einen Anteil am Wochenload,
-  // Nicht-Trainingstage bekommen 0 TSS.
   let dayWeights = new Array(7).fill(0); // Mo..So
   let countSelected = 0;
   for (let i = 0; i < 7; i++) {
@@ -154,6 +152,8 @@ async function simulatePlannedWeeks(
   let atl = atlStart;
   let prevTarget = weeklyTargetStart;
   let prevState = weekStateStart;
+
+  const out = [];
 
   for (let w = 1; w <= weeksToSim; w++) {
     const ctlAtWeekStart = ctl;
@@ -210,6 +210,15 @@ async function simulatePlannedWeeks(
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7 * w);
     const mondayId = mondayFutureDate.toISOString().slice(0, 10);
 
+    out.push({
+      weekOffset: w,
+      monday: mondayId,
+      weeklyTarget: nextTarget,
+      state: simState,
+      tsb: simTsb,
+      rampSim
+    });
+
     const emoji = stateEmoji(simState);
     const planText = `Rest ${nextTarget} | ${emoji} ${simState} (geplant)`;
 
@@ -251,6 +260,8 @@ async function simulatePlannedWeeks(
     prevTarget = nextTarget;
     prevState = simState;
   }
+
+  return out;
 }
 
 // ---------------------------------------------------------
@@ -382,9 +393,6 @@ async function handle(env, request) {
     }
 
     const planSelected = parseTrainingDays(mondayPlanString);
-    const plannedNames = [];
-    for (let i = 0; i < 7; i++) if (planSelected[i]) plannedNames.push(DAY_NAMES[i]);
-    const planStringForComment = plannedNames.join(",");
 
     // -----------------------------------------------------
     // 3) Vorwoche Ziel + Ist für Steigerungslogik
@@ -480,13 +488,10 @@ async function handle(env, request) {
     }
 
     // -----------------------------------------------------
-    // 5) Wochenload + Mikro-Infos
+    // 5) Wochenload (für Rest, aber nicht so wichtig für DryRun)
     // -----------------------------------------------------
     let weekLoad = 0;
-    let weekLoadUntilYesterday = 0;
     let weekArr = [];
-    const todayTime = todayDate.getTime();
-
     const weekRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness?oldest=${mondayStr}&newest=${today}&cols=id,ctlLoad`,
       { headers: { Authorization: authHeader } }
@@ -495,36 +500,32 @@ async function handle(env, request) {
       weekArr = await weekRes.json();
       for (const d of weekArr) {
         if (!d.id || d.ctlLoad == null) continue;
-        const dDate = new Date(d.id + "T00:00:00Z");
-        const load = d.ctlLoad;
-        if (!isNaN(dDate.getTime())) {
-          weekLoad += load;
-          if (dDate.getTime() < todayTime) weekLoadUntilYesterday += load;
-        }
+        weekLoad += d.ctlLoad;
       }
     } else if (weekRes.body) weekRes.body.cancel?.();
 
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
-    const weekDone = Math.max(0, Math.min(weeklyTarget, weekLoad));
 
-    let weekPercent = 0;
-    if (weeklyTarget > 0) weekPercent = Math.round((weekDone / weeklyTarget) * 100);
-    weekPercent = Math.max(0, Math.min(200, weekPercent));
+    // -----------------------------------------------------
+    // 6) Tagesziel – nur noch nötig für Normalbetrieb
+    // -----------------------------------------------------
+    const todayTime = todayDate.getTime();
 
-    let weekBarFilled = 0;
-    if (weeklyTarget > 0) weekBarFilled = Math.round((weekDone / weeklyTarget) * 10);
-    weekBarFilled = Math.max(0, Math.min(10, weekBarFilled));
-    const weekBar = "█".repeat(weekBarFilled) + "░".repeat(10 - weekBarFilled);
+    let weekLoadUntilYesterday = 0;
+    const ctlLoadByDate = new Map();
+    for (const d of weekArr) {
+      if (!d.id || d.ctlLoad == null) continue;
+      ctlLoadByDate.set(d.id, d.ctlLoad);
+      const dDate = new Date(d.id + "T00:00:00Z");
+      if (!isNaN(dDate.getTime()) && dDate.getTime() < todayTime) {
+        weekLoadUntilYesterday += d.ctlLoad;
+      }
+    }
 
     const MS_PER_DAY = 24 * 60 * 60 * 1000;
     const daysSinceMonday = Math.round(
       (todayDate.getTime() - mondayDate.getTime()) / MS_PER_DAY
     );
-
-    const ctlLoadByDate = new Map();
-    for (const d of weekArr) {
-      if (d.id && d.ctlLoad != null) ctlLoadByDate.set(d.id, d.ctlLoad);
-    }
 
     let daysSinceLastTraining = daysSinceMonday + 1;
     for (let o = 0; o <= daysSinceMonday; o++) {
@@ -554,16 +555,13 @@ async function handle(env, request) {
     const yesterdayLoad = ctlLoadByDate.get(yesterdayId) ?? 0;
 
     const twoDaysAgoDate = new Date(todayDate);
-    twoDaysAgoDate.setUTCDate(twoDaysAgoDate.getUTCDate() - 2);
+    twoDaysAgoDate.setUTCDate(todayDate.getUTCDate() - 2);
     const twoDaysAgoId = twoDaysAgoDate.toISOString().slice(0, 10);
     const twoDaysAgoLoad = ctlLoadByDate.get(twoDaysAgoId) ?? 0;
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
     const todayLoad = ctlLoadByDate.get(today) ?? 0;
 
-    // -----------------------------------------------------
-    // 6) Tagesziel – Wochenlogik + Mikro (mit clamp)
-    // -----------------------------------------------------
     const trueRemaining = Math.max(0, weeklyTarget - weekLoadUntilYesterday);
 
     // verbleibende geplante Trainingstage (inkl. heute, falls geplant)
@@ -579,16 +577,10 @@ async function handle(env, request) {
     if (isPlannedTrainingDay && remainingPlannedDays > 0) {
       plannedShareToday = trueRemaining / remainingPlannedDays;
       targetFromWeek = plannedShareToday;
-    } else {
-      targetFromWeek = 0; // kein Plan-Day → Plan drückt nicht
     }
 
-    // was wäre heute physiologisch möglich (ohne Plan)?
     const baseFromFitness = dailyTargetBase;
 
-    // Basis für das heutige Ziel:
-    // - Ruhetage im Plan: wir ignorieren den Plan → nur Fitness
-    // - Plantage: mindestens Plan, aber nicht unter Fitness
     let baseForToday = baseFromFitness;
     if (isPlannedTrainingDay && targetFromWeek > 0) {
       baseForToday = Math.max(baseFromFitness, targetFromWeek);
@@ -609,15 +601,12 @@ async function handle(env, request) {
     let microFactor = 1.0;
     let suggestRestDay = false;
 
-    // nach Pause etwas mehr
     if (daysSinceLastTraining >= 2 && tsb >= 0) microFactor *= 1.2;
     if (daysSinceLastTraining >= 3 && tsb >= 0) microFactor *= 1.1;
 
-    // Serien bremsen
     if (consecutiveTrainingDays >= 3) microFactor *= 0.8;
     if (consecutiveTrainingDays >= 4) microFactor *= 0.7;
 
-    // geplante Trainingstage für Thresholds
     const plannedDaysCount =
       planSelected.filter(Boolean).length || DEFAULT_TRAINING_DAYS_PER_WEEK;
     const avgTrainingDay = weeklyTarget / plannedDaysCount;
@@ -637,15 +626,12 @@ async function handle(env, request) {
       microFactor *= 0.7;
     }
 
-    // Mikro-Faktor clampen, damit es nicht komplett eskaliert
     microFactor = Math.max(0.6, Math.min(1.4, microFactor));
 
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
 
     const maxDailyByCtl = ctl * 3.0;
     const maxDailyByWeek = avgTrainingDay * 2.5;
-
-    // Hartes Tages-Cap zusätzlich zu CTL-/Wochen-Caps
     const maxDaily = Math.min(
       HARD_DAILY_CAP,
       Math.max(
@@ -661,145 +647,93 @@ async function handle(env, request) {
     const tssHigh = Math.round(tssTarget * 1.2);
 
     // -----------------------------------------------------
-    // 7) Kommentar & Plantext
+    // DryRun: Nur Wochen-TSS + Zukunft zeigen und fertig
     // -----------------------------------------------------
-    const emojiToday = stateEmoji(weekState);
+    const WEEKS_TO_SIM = 6;
+    const futureWeeks = await simulatePlannedWeeks(
+      ctlMon,
+      atlMon,
+      weekState,
+      weeklyTarget,
+      mondayDate,
+      planSelected,
+      authHeader,
+      athleteId,
+      WEEKS_TO_SIM,
+      dryRun
+    );
 
-    const commentText = `Tagesziel-Erklärung
+    if (dryRun) {
+      const responseBody = {
+        dryRun: true,
+        thisWeek: {
+          monday: mondayStr,
+          weeklyTarget,
+          alreadyDone: weekLoad,
+          remaining: weeklyRemaining
+        },
+        lastWeek: {
+          monday: lastMondayStr,
+          target: lastWeekTarget,
+          actual: lastWeekActual
+        },
+        weeklyProgression: futureWeeks.map(w => ({
+          weekOffset: w.weekOffset,
+          monday: w.monday,
+          weeklyTarget: w.weeklyTarget,
+          state: w.state
+        }))
+      };
 
-Woche:
-Ziel ${weeklyTarget} TSS
-Fortschritt [${weekBar}] ${weekPercent}% (${weekLoad.toFixed(1)}/${weeklyTarget})
-Geplante Trainingstage: ${planStringForComment || "(keine, Default: " + DEFAULT_PLAN_STRING + ")"}
-
-Status:
-CTL ${ctl.toFixed(1)} | ATL ${atl.toFixed(1)} | TSB ${tsb.toFixed(1)}
-Wochentyp ${weekState}
-Heutiger Plan-Tag: ${isPlannedTrainingDay ? "Ja" : "Nein"}
-
-Mikro:
-Tage seit letztem Training ${daysSinceLastTraining}, Serie ${consecutiveTrainingDays}
-Gestern ${yesterdayLoad.toFixed(1)} TSS, Vorgestern ${twoDaysAgoLoad.toFixed(1)} TSS
-Heute bisher: ${todayLoad.toFixed(1)} TSS
-2-Tage-Load: ${last2DaysLoad.toFixed(1)} TSS
-Empfehlung: ${
-      suggestRestDay
-        ? "eher Ruhetag oder nur sehr locker"
-        : "normale Belastung möglich"
+      return new Response(JSON.stringify(responseBody, null, 2), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
     }
 
-Rechenweg (Plan vs. Ist):
-trueRemaining (Rest vor heute) = ${trueRemaining.toFixed(1)} TSS
-verbleibende geplante Trainingstage (inkl. heute, falls geplant): ${remainingPlannedDays}
-geplanter Anteil heute (Plan) = ${plannedShareToday.toFixed(1)} TSS
-targetFromWeek (Plan-Komponente heute) = ${targetFromWeek.toFixed(1)} TSS
-
-Rechenweg (Tagesziel = was heute möglich wäre):
-baseFromFitness (rein aus CTL/ATL) = ${baseFromFitness.toFixed(1)}
-Basis für heutiges Ziel (baseForToday) = ${baseForToday.toFixed(1)}
-tsbFactor = ${tsbFactor.toFixed(2)}, microFactor = ${microFactor.toFixed(2)}
-dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
-
-Tagesziel: ${tssTarget} TSS
-Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
-
+    // -----------------------------------------------------
+    // Normalbetrieb: Heute + Zukunft in Intervals schreiben
+    // -----------------------------------------------------
+    const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: tssTarget,
       [INTERVALS_PLAN_FIELD]: planTextToday,
-      comments: commentText
+      comments: `Tagesziel: ${tssTarget} TSS (Range ${tssLow}–${tssHigh})`
     };
 
-    // nur Montag schreibt Wochenziel explizit ins Feld, wenn noch nicht gesetzt
     if (today === mondayStr && mondayWeeklyTarget == null) {
       payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
     }
 
-    if (!dryRun) {
-      const updateRes = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payloadToday)
-        }
-      );
-      if (!updateRes.ok) {
-        const text = await updateRes.text();
-        return new Response(
-          `Failed to update wellness: ${updateRes.status} ${text}`,
-          { status: 500 }
-        );
-      } else if (updateRes.body) updateRes.body.cancel?.();
-    }
-
-    // -----------------------------------------------------
-    // 8) 6-Wochen-Simulation auf Basis HEUTE (nur wenn kein dryRun)
-    // -----------------------------------------------------
-    const WEEKS_TO_SIM = 6;
-    if (!dryRun) {
-      await simulatePlannedWeeks(
-        ctlMon,            // CTL am Wochenanfang (Montag)
-        atlMon,            // ATL am Wochenanfang
-        weekState,         // aktueller Wochentyp
-        weeklyTarget,      // aktuelles Wochenziel
-        mondayDate,        // Date-Objekt des aktuellen Montags
-        planSelected,      // bool[7] für Mo..So
-        authHeader,
-        athleteId,
-        WEEKS_TO_SIM,
-        dryRun
-      );
-    }
-
-    // -----------------------------------------------------
-    // 9) JSON-Ausgabe für Tests (inkl. Wochen-TSS-Infos)
-    // -----------------------------------------------------
-    const responseBody = {
-      dryRun,
-      date: today,
-      weeklyTarget,
-      weeklyRemaining,
-      weekDone,
-      weekPercent,
-      lastWeek: {
-        target: lastWeekTarget,
-        actual: lastWeekActual
-      },
-      ctlMon,
-      atlMon,
-      ctlToday: ctl,
-      atlToday: atl,
-      tsb,
-      weekState,
-      plan: {
-        mondayPlanString,
-        planSelected: DAY_NAMES.map((n, i) => ({ day: n, selected: !!planSelected[i] })),
-        isPlannedTrainingDay,
-        remainingPlannedDays
-      },
-      daily: {
-        tssTarget,
-        tssLow,
-        tssHigh,
-        baseFromFitness,
-        baseForToday,
-        tsbFactor,
-        microFactor,
-        combinedBase,
-        suggestRestDay
+    const updateRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader
+        },
+        body: JSON.stringify(payloadToday)
       }
-    };
+    );
+    if (!updateRes.ok) {
+      const text = await updateRes.text();
+      return new Response(
+        `Failed to update wellness: ${updateRes.status} ${text}`,
+        { status: 500 }
+      );
+    } else if (updateRes.body) updateRes.body.cancel?.();
 
-    return new Response(JSON.stringify(responseBody, null, 2), {
-      status: 200,
-      headers: { "Content-Type": "application/json" }
-    });
+    // futureWeeks wurde oben schon berechnet; hier im Normalbetrieb werden
+    // die PUTs in simulatePlannedWeeks ausgeführt.
+
+    return new Response(
+      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}`,
+      { status: 200 }
+    );
   } catch (err) {
     console.error("Unexpected error:", err);
     return new Response(
@@ -818,7 +752,7 @@ export default {
     return handle(env, request);
   },
   async scheduled(event, env, ctx) {
-    // kein Request → dryRun = false
+    // kein Request → kein dryRun
     ctx.waitUntil(handle(env, null));
   }
 };
