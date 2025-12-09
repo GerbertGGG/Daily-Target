@@ -13,7 +13,7 @@ const DAILY_TYPE_FIELD = "TagesTyp";            // z.B. "Mo,Mi,Fr,So"
 const DEFAULT_PLAN_STRING = "Mo,Mi,Fr,So";
 const DEFAULT_TRAINING_DAYS_PER_WEEK = 4.0;
 
-// Hardes Tages-Cap (Punkt 3)
+// Hartes Tages-Cap
 const HARD_DAILY_CAP = 200;
 
 // ---------------------------------------------------------
@@ -128,7 +128,7 @@ async function simulatePlannedWeeks(
 
   // Trainingsmuster aus Plan (bool[7]) → Gewichte pro Tag
   // Nur Tage mit planSelected[i] = true erhalten einen Anteil am Wochenload,
-  // Nicht-Trainingstage bekommen 0 TSS (Punkt 4: Kommentar zur Planverwendung).
+  // Nicht-Trainingstage bekommen 0 TSS.
   let dayWeights = new Array(7).fill(0); // Mo..So
   let countSelected = 0;
   for (let i = 0; i < 7; i++) {
@@ -170,13 +170,19 @@ async function simulatePlannedWeeks(
     const atlEnd = atl;
     const rampSim = ctlEnd - ctlAtWeekStart;
 
-    const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampSim);
+    const { state: simState, tsb: simTsb } = classifyWeek(ctlEnd, atlEnd, rampSim);
 
-    // einfache Ramp-Logik für geplante Wochen:
+    // Ramp-/Deload-Logik für geplante Wochen:
     let nextTarget = prevTarget;
 
     if (simState === "Müde") {
-      nextTarget = prevTarget * 0.8; // Entlastungswoche
+      const ratio = ctlEnd > 0 ? atlEnd / ctlEnd : Infinity;
+      // starke Deload, wenn richtig müde (sehr negativer TSB oder hohe ATL/CTL-Ratio)
+      if (simTsb < -20 || ratio > 1.4) {
+        nextTarget = prevTarget * 0.8;   // starke Entlastungswoche
+      } else {
+        nextTarget = prevTarget * 0.9;   // mildere Entlastungswoche
+      }
     } else {
       if (rampSim < 0.5) {
         // CTL stagniert → etwas stärker steigern
@@ -412,8 +418,15 @@ async function handle(env) {
     // 4) Wochenziel berechnen
     // -----------------------------------------------------
     let weeklyTarget;
-    const baseFactor =
-      weekState === "Erholt" ? 8 : weekState === "Müde" ? 5.5 : 7;
+
+    // Punkt 5: Niedrige CTL bekommen sanftere Basisfaktoren
+    let baseFactor;
+    if (ctlMon < 25) {
+      // Einsteiger-Modus: etwas konservativer
+      baseFactor = weekState === "Erholt" ? 7 : weekState === "Müde" ? 5 : 6;
+    } else {
+      baseFactor = weekState === "Erholt" ? 8 : weekState === "Müde" ? 5.5 : 7;
+    }
 
     if (mondayWeeklyTarget != null) {
       // Rest der Woche: Montag-Ziel verwenden
@@ -439,6 +452,20 @@ async function handle(env) {
         }
 
         weeklyTargetRaw = Math.max(weeklyTargetRaw, Math.round(minAllowed));
+      }
+
+      // Punkt 1: Wochenziel zusätzlich durch Ramp-Cap begrenzen
+      if (lastWeekActual != null && lastWeekActual > 0) {
+        let rampLimit;
+        if (ctlMon < 30) rampLimit = 1.15;      // max +15 % bei sehr niedriger CTL
+        else if (ctlMon < 60) rampLimit = 1.10; // max +10 % bei mittlerer CTL
+        else rampLimit = 1.08;                  // max +8 % bei hoher CTL
+
+        const maxWeeklyTargetByRamp = lastWeekActual * rampLimit;
+        weeklyTargetRaw = Math.min(
+          weeklyTargetRaw,
+          Math.round(maxWeeklyTargetByRamp)
+        );
       }
 
       weeklyTarget = weeklyTargetRaw;
@@ -582,7 +609,7 @@ async function handle(env) {
     if (consecutiveTrainingDays >= 3) microFactor *= 0.8;
     if (consecutiveTrainingDays >= 4) microFactor *= 0.7;
 
-    // Punkt 2: durchschnittlicher Trainingstag anhand des tatsächlichen Plans
+    // geplante Trainingstage für Thresholds
     const plannedDaysCount =
       planSelected.filter(Boolean).length || DEFAULT_TRAINING_DAYS_PER_WEEK;
     const avgTrainingDay = weeklyTarget / plannedDaysCount;
@@ -602,12 +629,15 @@ async function handle(env) {
       microFactor *= 0.7;
     }
 
+    // Punkt 4: Mikro-Faktor clampen, damit es nicht komplett eskaliert
+    microFactor = Math.max(0.6, Math.min(1.4, microFactor));
+
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
 
     const maxDailyByCtl = ctl * 3.0;
     const maxDailyByWeek = avgTrainingDay * 2.5;
 
-    // Punkt 3: hartes Tages-Cap zusätzlich zu CTL-/Wochen-Caps
+    // Hartes Tages-Cap zusätzlich zu CTL-/Wochen-Caps
     const maxDaily = Math.min(
       HARD_DAILY_CAP,
       Math.max(
