@@ -1182,17 +1182,7 @@ if (today === mondayStr && mondayWeeklyTarget == null) {
   payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
 }
 
-const updateRes = await fetch(
-  `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
-  {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: authHeader
-    },
-    body: JSON.stringify(payloadToday)
-  }
-);
+
 
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
