@@ -1044,7 +1044,7 @@ if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
         planString = todaysDailyType;
         planIsDefault = false;
       }
-    }
+   
     // Neuer Plan gilt ab heute → Plan-TSS für Restwoche neu schreiben
     const jsDay = todayDate.getUTCDay();       // 0=So..6=Sa
     const dayIdx = jsDay === 0 ? 6 : jsDay-1;  // 0=Mo..6=So
@@ -1057,7 +1057,7 @@ if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
       planWeights,
       dayIdx   // ab heutigem Wochentag neu planen
     );
-
+ }
     // 8) Tagesziel – aus Wochenplan mit Umverteilung
     let targetFromWeek;
     let plannedTodayBase = 0;
