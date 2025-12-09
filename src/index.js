@@ -13,6 +13,9 @@ const DAILY_TYPE_FIELD = "TagesTyp";            // z.B. "Mo,Mi,Fr,So"
 const DEFAULT_PLAN_STRING = "Mo,Mi,Fr,So";
 const DEFAULT_TRAINING_DAYS_PER_WEEK = 4.0;
 
+// Hardes Tages-Cap (Punkt 3)
+const HARD_DAILY_CAP = 200;
+
 // ---------------------------------------------------------
 // Helper
 // ---------------------------------------------------------
@@ -123,7 +126,9 @@ async function simulatePlannedWeeks(
   const tauCtl = 42;
   const tauAtl = 7;
 
-  // Trainingsmuster aus Plan (bool[7]) → Gewichte
+  // Trainingsmuster aus Plan (bool[7]) → Gewichte pro Tag
+  // Nur Tage mit planSelected[i] = true erhalten einen Anteil am Wochenload,
+  // Nicht-Trainingstage bekommen 0 TSS (Punkt 4: Kommentar zur Planverwendung).
   let dayWeights = new Array(7).fill(0); // Mo..So
   let countSelected = 0;
   for (let i = 0; i < 7; i++) {
@@ -155,7 +160,7 @@ async function simulatePlannedWeeks(
     // 7 Tage simulieren
     for (let d = 0; d < 7; d++) {
       const share = dayWeights[d] / sumWeights;
-      const load = prevTarget * share; // TSS an diesem Tag
+      const load = prevTarget * share; // TSS an diesem Tag (nur Trainingstage > 0)
 
       ctl = ctl + (load - ctl) / tauCtl;
       atl = atl + (load - atl) / tauAtl;
@@ -293,6 +298,7 @@ async function handle(env) {
     const atl = wellness.atl;
     const rampRate = wellness.rampRate ?? 0;
     if (ctl == null || atl == null) {
+      console.warn("No ctl/atl data for today");
       return new Response("No ctl/atl data", { status: 200 });
     }
 
@@ -576,8 +582,10 @@ async function handle(env) {
     if (consecutiveTrainingDays >= 3) microFactor *= 0.8;
     if (consecutiveTrainingDays >= 4) microFactor *= 0.7;
 
-    const avgTrainingDay =
-      weeklyTarget / (DEFAULT_TRAINING_DAYS_PER_WEEK || 4.0);
+    // Punkt 2: durchschnittlicher Trainingstag anhand des tatsächlichen Plans
+    const plannedDaysCount =
+      planSelected.filter(Boolean).length || DEFAULT_TRAINING_DAYS_PER_WEEK;
+    const avgTrainingDay = weeklyTarget / plannedDaysCount;
 
     const heavyThreshold = Math.max(1.5 * avgTrainingDay, 60);
     const veryHeavyThreshold = Math.max(2.2 * avgTrainingDay, 90);
@@ -598,9 +606,14 @@ async function handle(env) {
 
     const maxDailyByCtl = ctl * 3.0;
     const maxDailyByWeek = avgTrainingDay * 2.5;
-    const maxDaily = Math.max(
-      baseFromFitness,
-      Math.min(maxDailyByCtl, maxDailyByWeek)
+
+    // Punkt 3: hartes Tages-Cap zusätzlich zu CTL-/Wochen-Caps
+    const maxDaily = Math.min(
+      HARD_DAILY_CAP,
+      Math.max(
+        baseFromFitness,
+        Math.min(maxDailyByCtl, maxDailyByWeek)
+      )
     );
 
     dailyTargetRaw = Math.max(0, dailyTargetRaw);
