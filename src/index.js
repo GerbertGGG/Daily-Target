@@ -1168,12 +1168,32 @@ dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 Tagesziel = ${tssTarget} TSS
 Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
 
-    const payloadToday = {
-      id: today,
-      [INTERVALS_TARGET_FIELD]: tssTarget,
-      [INTERVALS_PLAN_FIELD]: planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`,
-      comments: commentText
-    };
+  const emojiToday = stateEmoji(weekState);
+const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
+
+const payloadToday = {
+  id: today,
+  [INTERVALS_TARGET_FIELD]: tssTarget,
+  [INTERVALS_PLAN_FIELD]: planTextToday,
+  comments: commentText
+};
+
+if (today === mondayStr && mondayWeeklyTarget == null) {
+  payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
+}
+
+const updateRes = await fetch(
+  `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
+  {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: authHeader
+    },
+    body: JSON.stringify(payloadToday)
+  }
+);
+
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
       payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
