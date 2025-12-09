@@ -763,11 +763,8 @@ const shareTodayPct = (weekdayWeights[(weekday === 0 ? 6 : weekday - 1)] * 100).
 const jsDay = weekday;
 const dayIdx = jsDay === 0 ? 6 : jsDay - 1;
 
-// Musterzeile (Gewichte)
-const patternLine = weekdayWeights.map(v => v.toFixed(2)).join(" ");
 
-// Anteil heutiger Tag an der Wochenlast (aus den Gewichten)
-const shareTodayPct = (weekdayWeights[dayIdx] * 100).toFixed(1);
+    
 
 // Stats für Heute (Idee 1)
 const trainCountToday = stats.trainCount?.[dayIdx] ?? 0;
