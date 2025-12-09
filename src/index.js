@@ -78,7 +78,6 @@ function parseTrainingDays(str) {
 
 // stats-Objekt: { trainCount: number[7], sumLoad: number[7], weeks: number }
 
-// Aus Stats ein Gewichts-Muster Mo..So ableiten
 function normalizePattern(stats) {
   // Backwards-Kompatibilität: falls noch ein altes Array drin liegt
   if (Array.isArray(stats)) {
@@ -86,9 +85,7 @@ function normalizePattern(stats) {
       typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0
     );
     let sum = arr.reduce((a, b) => a + b, 0);
-    if (sum <= 0) {
-      return new Array(7).fill(1 / 7);
-    }
+    if (sum <= 0) return new Array(7).fill(1 / 7);
     return arr.map((v) => v / sum);
   }
 
@@ -103,21 +100,16 @@ function normalizePattern(stats) {
     const sl = sumLoad[i] ?? 0;
     const w = weeks > 0 ? weeks : 1;
 
-    // P(Training an diesem Tag) ~ Anteil der Wochen mit Training an diesem Tag
     let pTrain = tc / w;
     if (pTrain > 1) pTrain = 1;
 
-    // Ø-Load, wenn trainiert wurde
     const avgIfTrain = tc > 0 ? sl / tc : 0;
 
-    // Erwartete Last dieses Wochentags
     scores[i] = pTrain * avgIfTrain;
   }
 
   let sumScores = scores.reduce((a, b) => a + b, 0);
-  if (sumScores <= 0) {
-    return new Array(7).fill(1 / 7);
-  }
+  if (sumScores <= 0) return new Array(7).fill(1 / 7);
 
   return scores.map((v) => v / sumScores);
 }
@@ -154,9 +146,8 @@ async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDa
         const load = d.ctlLoad;
         const dateObj = new Date(d.id + "T00:00:00Z");
         if (isNaN(dateObj.getTime())) continue;
-        const jsDay = dateObj.getUTCDay(); // 0=So,1=Mo...
+        const jsDay = dateObj.getUTCDay();
         const idx = dayIdxFromJsDay(jsDay);
-
         if (idx >= 0 && idx < 7 && load >= TRAIN_THRESHOLD) {
           trainCount[idx] += 1;
           sumLoad[idx] += load;
@@ -198,7 +189,6 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
   try {
     const parsed = JSON.parse(rawStr);
 
-    // Neuer Typ: Objekt mit trainCount/sumLoad/weeks
     if (
       parsed &&
       Array.isArray(parsed.trainCount) &&
@@ -210,7 +200,6 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
       return parsed;
     }
 
-    // Alt: reines Array → vorsichtig in neue Stats überführen
     if (Array.isArray(parsed)) {
       const arr = parsed.map((v) =>
         typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0
@@ -229,7 +218,6 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
     console.error("Error parsing weekday stats from KV:", e);
   }
 
-  // Fallback, wenn KV kaputt
   const stats = {
     trainCount: new Array(7).fill(1),
     sumLoad: new Array(7).fill(1),
@@ -241,12 +229,10 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
 
 // Stats mit gestrigem Load updaten
 async function updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad) {
-  if (!yesterdayDate || yesterdayLoad == null) {
-    return stats;
-  }
+  if (!yesterdayDate || yesterdayLoad == null) return stats;
 
   const d = yesterdayDate;
-  const jsDay = d.getUTCDay(); // 0=So,1=Mo...
+  const jsDay = d.getUTCDay();
   const idx = dayIdxFromJsDay(jsDay);
 
   if (!stats || typeof stats !== "object") {
@@ -277,7 +263,7 @@ async function updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLo
 }
 
 // ---------------------------------------------------------
-// Hilfsfunktionen Training / Müdigkeit / Taper
+// Training / Müdigkeit / Taper
 // ---------------------------------------------------------
 
 function computeDailyTarget(ctl, atl) {
@@ -293,41 +279,27 @@ function classifyWeek(ctl, atl, rampRate) {
   const tsb = ctl - atl;
 
   let tsbCritical;
-  if (ctl < 50) {
-    tsbCritical = -5;
-  } else if (ctl < 80) {
-    tsbCritical = -10;
-  } else {
-    tsbCritical = -15;
-  }
+  if (ctl < 50) tsbCritical = -5;
+  else if (ctl < 80) tsbCritical = -10;
+  else tsbCritical = -15;
+
   const isTsbTired = tsb <= tsbCritical;
 
   let atlCtlRatio = Infinity;
-  if (ctl > 0) {
-    atlCtlRatio = atl / ctl;
-  }
+  if (ctl > 0) atlCtlRatio = atl / ctl;
 
   let atlRatioThreshold;
-  if (ctl < 50) {
-    atlRatioThreshold = 1.2;
-  } else if (ctl < 80) {
-    atlRatioThreshold = 1.3;
-  } else {
-    atlRatioThreshold = 1.4;
-  }
+  if (ctl < 50) atlRatioThreshold = 1.2;
+  else if (ctl < 80) atlRatioThreshold = 1.3;
+  else atlRatioThreshold = 1.4;
+
   const isAtlHigh = atlCtlRatio >= atlRatioThreshold;
 
   const isRampHigh = rampRate >= 1.0;
   const isRampLowAndFresh = rampRate <= -0.5 && tsb >= -5;
 
-  if (isRampLowAndFresh) {
-    return { state: "Erholt", tsb };
-  }
-
-  if (isRampHigh || isTsbTired || isAtlHigh) {
-    return { state: "Müde", tsb };
-  }
-
+  if (isRampLowAndFresh) return { state: "Erholt", tsb };
+  if (isRampHigh || isTsbTired || isAtlHigh) return { state: "Müde", tsb };
   return { state: "Normal", tsb };
 }
 
@@ -337,7 +309,6 @@ function stateEmoji(state) {
   return "⚖️";
 }
 
-// Nächstes Event holen (RACE/TARGET, optional)
 async function getNextEventDate(athleteId, authHeader, todayStr) {
   const todayDate = new Date(todayStr + "T00:00:00Z");
   const futureDate = new Date(todayDate);
@@ -367,10 +338,7 @@ async function getNextEventDate(athleteId, authHeader, todayStr) {
 
     const dDateOnly = new Date(d.toISOString().slice(0, 10) + "T00:00:00Z");
     if (dDateOnly < todayDate) continue;
-
-    if (!bestDate || dDateOnly < bestDate) {
-      bestDate = dDateOnly;
-    }
+    if (!bestDate || dDateOnly < bestDate) bestDate = dDateOnly;
   }
 
   if (!bestDate) return null;
@@ -384,7 +352,6 @@ async function getNextEventDate(athleteId, authHeader, todayStr) {
   };
 }
 
-// Sehr einfache Taperberechnung: so wählen, dass TSB am Event >= 0 (grobe Näherung)
 function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
   if (daysToEvent <= 0) return 0;
 
@@ -400,7 +367,6 @@ function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
 
     for (let day = 0; day < daysToEvent; day++) {
       let factor = 1.0;
-
       if (day >= taperStartIndex) {
         if (taperDays <= 1) {
           factor = TAPER_DAILY_END;
@@ -430,7 +396,7 @@ function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
 }
 
 // ---------------------------------------------------------
-// Wochenplan-Logik + KV (Plan-String & Gewichte)
+// Wochenplan + KV
 // ---------------------------------------------------------
 
 async function saveWeekPlan(env, mondayStr, weights, planString) {
@@ -443,7 +409,6 @@ async function saveWeekPlan(env, mondayStr, weights, planString) {
   await env.KV.put(WEEKPLAN_STRING_PREFIX + mondayStr, planString);
 }
 
-// Plan aus KV laden → { weights, planString } oder null
 async function loadWeekPlan(env, mondayStr) {
   if (!env || !env.KV || !env.KV.get) return null;
 
@@ -475,26 +440,20 @@ async function loadWeekPlan(env, mondayStr) {
     if (trimmed.length > 0) planString = trimmed;
   }
 
-  // Falls nur planString existiert → Gewichte daraus generieren
   if (!weights && planString) {
     const selected = parseTrainingDays(planString);
     const count = selected.filter(Boolean).length;
     if (count > 0) {
       const per = 1.0 / count;
       weights = new Array(7).fill(0);
-      for (let i = 0; i < 7; i++) {
-        if (selected[i]) weights[i] = per;
-      }
+      for (let i = 0; i < 7; i++) if (selected[i]) weights[i] = per;
       await saveWeekPlan(env, mondayStr, weights, planString);
     }
   }
 
-  // Falls nur weights vorhanden → Plan-String aus Gewichten ableiten
   if (weights && !planString) {
     const names = [];
-    for (let i = 0; i < 7; i++) {
-      if ((weights[i] ?? 0) > 0) names.push(DAY_NAMES[i]);
-    }
+    for (let i = 0; i < 7; i++) if ((weights[i] ?? 0) > 0) names.push(DAY_NAMES[i]);
     planString = names.length > 0 ? names.join(",") : "Mo,Mi,Fr,So";
     await saveWeekPlan(env, mondayStr, weights, planString);
   }
@@ -504,14 +463,11 @@ async function loadWeekPlan(env, mondayStr) {
 }
 
 // Am Sonntag: dein `TagesTyp` ist der Plan für die NÄCHSTE Woche
-async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday) {
+async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday, authHeader) {
   if (!env || !env.KV || !env.KV.put) return null;
 
   const jsDay = todayDate.getUTCDay();
-  if (jsDay !== 0) {
-    // Nur am Sonntag
-    return null;
-  }
+  if (jsDay !== 0) return null;
 
   const raw = wellnessToday[DAILY_TYPE_FIELD];
   if (!raw || typeof raw !== "string") return null;
@@ -523,7 +479,6 @@ async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday) {
   const count = selected.filter(Boolean).length;
   if (count === 0) return null;
 
-  // Montag der nächsten Woche bestimmen
   const weekday = jsDay; // 0=So
   const offset = weekday === 0 ? 6 : weekday - 1;
   const mondayThisWeek = new Date(todayDate);
@@ -534,19 +489,14 @@ async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday) {
 
   const weights = new Array(7).fill(0);
   const per = 1.0 / count;
-  for (let i = 0; i < 7; i++) {
-    if (selected[i]) weights[i] = per;
-  }
+  for (let i = 0; i < 7; i++) if (selected[i]) weights[i] = per;
 
   await saveWeekPlan(env, nextMondayStr, weights, planString);
-
   return { weekStart: nextMondayStr, weights, planString };
 }
 
 // Plan-String in alle Tage der Woche schreiben, wo DAILY_TYPE_FIELD leer ist
-async function ensureDailyTypePlanForWeek(env, mondayStr, planString, todayDate) {
-  if (!env || !env.KV) return;
-
+async function ensureDailyTypePlanForWeek(env, mondayStr, planString, authHeader) {
   const mondayDate = new Date(mondayStr + "T00:00:00Z");
   if (isNaN(mondayDate.getTime())) return;
 
@@ -554,80 +504,6 @@ async function ensureDailyTypePlanForWeek(env, mondayStr, planString, todayDate)
     const d = new Date(mondayDate);
     d.setUTCDate(d.getUTCDate() + i);
     const id = d.toISOString().slice(0, 10);
-
-    // Wir schreiben **nicht** in Vergangenheits-Tage, die schon echte Daten haben,
-    // aber wir dürfen den Plan auch vorher sichtbar machen – also kein Limit hier.
-    // Wir überschreiben NIE, wenn das Feld schon nicht-leer ist.
-    try {
-      const res = await fetch(
-        `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
-        { headers: { Authorization: "Basic " + btoa(`API_KEY:${INTERVALS_API_KEY}`) } }
-      );
-      if (!res.ok) continue;
-      const data = await res.json();
-      const raw = data[DAILY_TYPE_FIELD];
-      const existing =
-        raw == null
-          ? ""
-          : typeof raw === "string"
-          ? raw.trim()
-          : String(raw).trim();
-
-      if (!existing) {
-        // Feld ist leer → Plan-String reinschreiben
-        const payload = {
-          id,
-          [DAILY_TYPE_FIELD]: planString
-        };
-        const putRes = await fetch(
-          `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
-          {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: "Basic " + btoa(`API_KEY:${INTERVALS_API_KEY}`)
-            },
-            body: JSON.stringify(payload)
-          }
-        );
-        if (!putRes.ok && putRes.body) {
-          putRes.body.cancel?.();
-        }
-      }
-    } catch (e) {
-      console.error("ensureDailyTypePlanForWeek error:", e);
-    }
-  }
-}
-
-// Wenn du den Plan unter der Woche änderst → Restwoche anpassen
-async function propagatePlanStringForRestOfWeek(
-  env,
-  mondayStr,
-  oldPlanString,
-  newPlanString,
-  todayDate
-) {
-  if (!env) return;
-
-  const mondayDate = new Date(mondayStr + "T00:00:00Z");
-  if (isNaN(mondayDate.getTime())) return;
-
-  const todayTime = todayDate.getTime();
-  const oldTrim = (oldPlanString || "").trim();
-  const newTrim = (newPlanString || "").trim();
-
-  const authHeader = "Basic " + btoa(`API_KEY:${INTERVALS_API_KEY}`);
-
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(mondayDate);
-    d.setUTCDate(d.getUTCDate() + i);
-    const id = d.toISOString().slice(0, 10);
-
-    if (d.getTime() < todayTime) {
-      // Vergangene Tage nicht anrühren
-      continue;
-    }
 
     try {
       const res = await fetch(
@@ -644,7 +520,68 @@ async function propagatePlanStringForRestOfWeek(
           ? raw.trim()
           : String(raw).trim();
 
-      // Nur überschreiben, wenn es leer ist oder exakt der alte Plan drin stand
+      if (!existing) {
+        const payload = {
+          id,
+          [DAILY_TYPE_FIELD]: planString
+        };
+        const putRes = await fetch(
+          `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: authHeader
+            },
+            body: JSON.stringify(payload)
+          }
+        );
+        if (!putRes.ok && putRes.body) putRes.body.cancel?.();
+      }
+    } catch (e) {
+      console.error("ensureDailyTypePlanForWeek error:", e);
+    }
+  }
+}
+
+// Wenn du den Plan unter der Woche änderst → Restwoche anpassen
+async function propagatePlanStringForRestOfWeek(
+  env,
+  mondayStr,
+  oldPlanString,
+  newPlanString,
+  todayDate,
+  authHeader
+) {
+  const mondayDate = new Date(mondayStr + "T00:00:00Z");
+  if (isNaN(mondayDate.getTime())) return;
+
+  const todayTime = todayDate.getTime();
+  const oldTrim = (oldPlanString || "").trim();
+  const newTrim = (newPlanString || "").trim();
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(mondayDate);
+    d.setUTCDate(d.getUTCDate() + i);
+    const id = d.toISOString().slice(0, 10);
+
+    if (d.getTime() < todayTime) continue;
+
+    try {
+      const res = await fetch(
+        `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const raw = data[DAILY_TYPE_FIELD];
+      const existing =
+        raw == null
+          ? ""
+          : typeof raw === "string"
+          ? raw.trim()
+          : String(raw).trim();
+
       if (!existing || existing === oldTrim) {
         const payload = {
           id,
@@ -661,9 +598,7 @@ async function propagatePlanStringForRestOfWeek(
             body: JSON.stringify(payload)
           }
         );
-        if (!putRes.ok && putRes.body) {
-          putRes.body.cancel?.();
-        }
+        if (!putRes.ok && putRes.body) putRes.body.cancel?.();
       }
     } catch (e) {
       console.error("propagatePlanStringForRestOfWeek error:", e);
@@ -679,18 +614,16 @@ async function handle(env) {
   try {
     const apiKey = INTERVALS_API_KEY;
     const athleteId = INTERVALS_ATHLETE_ID;
-
     if (!apiKey || !athleteId) {
       return new Response("Missing config", { status: 500 });
     }
-
     const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
 
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     const todayDate = new Date(today + "T00:00:00Z");
 
-    const jsDay = todayDate.getUTCDay(); // 0=So,1=Mo,...
+    const jsDay = todayDate.getUTCDay(); // 0=So..6=Sa
     const dayIdx = dayIdxFromJsDay(jsDay);
 
     const offset = jsDay === 0 ? 6 : jsDay - 1;
@@ -717,19 +650,12 @@ async function handle(env) {
         { status: 500 }
       );
     }
-
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl;
     const atl = wellness.atl;
     const rampRate = wellness.rampRate ?? 0;
-
     if (ctl == null || atl == null) {
       return new Response("No ctl/atl data", { status: 200 });
-    }
-
-    // Am Sonntag: dein `TagesTyp` als Plan für NÄCHSTE Woche speichern
-    if (jsDay === 0) {
-      await storeNextWeekPlanFromSunday(env, todayDate, wellness);
     }
 
     const todaysDailyTypeRaw = wellness[DAILY_TYPE_FIELD];
@@ -740,19 +666,24 @@ async function handle(env) {
         ? todaysDailyTypeRaw.trim()
         : String(todaysDailyTypeRaw).trim();
 
-    const { state: weekState, tsb } = classifyWeek(ctl, atl, rampRate);
+    // Sonntag: Plan für nächste Woche aus TagesTyp
+    if (jsDay === 0) {
+      await storeNextWeekPlanFromSunday(env, todayDate, wellness, authHeader);
+    }
+
+    const weekClass = classifyWeek(ctl, atl, rampRate);
+    const weekState = weekClass.state;
+    const tsb = weekClass.tsb;
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
     // 2) Montag-Werte
+    let ctlMon;
+    let atlMon;
+    let mondayWeeklyTarget = null;
     const mondayWellnessRes = await fetch(
       `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
       { headers: { Authorization: authHeader } }
     );
-
-    let ctlMon;
-    let atlMon;
-    let mondayWeeklyTarget = null;
-
     if (mondayWellnessRes.ok) {
       const mon = await mondayWellnessRes.json();
       ctlMon = mon.ctl ?? ctl;
@@ -763,7 +694,7 @@ async function handle(env) {
       atlMon = atl;
     }
 
-    // 2b) Vorwoche Ziel + Ist
+    // Vorwoche Ziel + Ist
     let lastWeekTarget = null;
     let lastWeekActual = null;
 
@@ -775,9 +706,7 @@ async function handle(env) {
       if (lastMonWellRes.ok) {
         const lastMonWell = await lastMonWellRes.json();
         lastWeekTarget = lastMonWell[WEEKLY_TARGET_FIELD] ?? null;
-      } else if (lastMonWellRes.body) {
-        lastMonWellRes.body.cancel?.();
-      }
+      } else if (lastMonWellRes.body) lastMonWellRes.body.cancel?.();
     } catch (e) {
       console.error("Error fetching last Monday wellness:", e);
     }
@@ -794,19 +723,16 @@ async function handle(env) {
           if (d.ctlLoad != null) sum += d.ctlLoad;
         }
         lastWeekActual = sum;
-      } else if (lastWeekRes.body) {
-        lastWeekRes.body.cancel?.();
-      }
+      } else if (lastWeekRes.body) lastWeekRes.body.cancel?.();
     } catch (e) {
       console.error("Error fetching last week load:", e);
     }
 
-    // 3) Wochenzustand → Faktor
+    // 3) Wochenziel
     let factor = 7;
     if (weekState === "Erholt") factor = 8;
     if (weekState === "Müde") factor = 5.5;
 
-    // 3b) Wochenziel
     let weeklyTarget;
     if (mondayWeeklyTarget != null) {
       weeklyTarget = mondayWeeklyTarget;
@@ -831,7 +757,7 @@ async function handle(env) {
       weeklyTarget = weeklyTargetRaw;
     }
 
-    // 4) Event & Taper (optional, wirkt nur auf Tagesziel)
+    // 4) Event & Taper (optional)
     let taperDailyFactor = 1.0;
     let inTaper = false;
 
@@ -840,24 +766,20 @@ async function handle(env) {
       if (evt && evt.daysToEvent > 0) {
         const normalLoad = ctl;
         const taperDays = computeTaperDays(ctl, atl, normalLoad, evt.daysToEvent);
-
         if (taperDays > 0 && evt.daysToEvent <= taperDays) {
           const taperStartIndex = evt.daysToEvent - taperDays;
-          const dayIndex2 = 0;
-
+          const dayIndexSim = 0;
           let progress = 0;
           if (taperDays <= 1) {
             progress = 1;
           } else {
-            const pos = dayIndex2 - taperStartIndex;
+            const pos = dayIndexSim - taperStartIndex;
             const progressRaw = pos / (taperDays - 1);
             progress = Math.max(0, Math.min(1, progressRaw));
           }
-
           taperDailyFactor =
             TAPER_DAILY_START +
             (TAPER_DAILY_END - TAPER_DAILY_START) * progress;
-
           inTaper = true;
         }
       }
@@ -869,7 +791,6 @@ async function handle(env) {
     let weekLoad = 0;
     let weekLoadUntilYesterday = 0;
     let weekArr = [];
-
     const todayTime = todayDate.getTime();
 
     const weekRes = await fetch(
@@ -878,34 +799,26 @@ async function handle(env) {
     );
     if (weekRes.ok) {
       weekArr = await weekRes.json();
-      for (const day of weekArr) {
-        if (!day.id || day.ctlLoad == null) continue;
-        const dDate = new Date(day.id + "T00:00:00Z");
-        const load = day.ctlLoad;
+      for (const d of weekArr) {
+        if (!d.id || d.ctlLoad == null) continue;
+        const dDate = new Date(d.id + "T00:00:00Z");
+        const load = d.ctlLoad;
         if (!isNaN(dDate.getTime())) {
           weekLoad += load;
-          if (dDate.getTime() < todayTime) {
-            weekLoadUntilYesterday += load;
-          }
+          if (dDate.getTime() < todayTime) weekLoadUntilYesterday += load;
         }
       }
-    } else if (weekRes.body) {
-      weekRes.body.cancel?.();
-    }
+    } else if (weekRes.body) weekRes.body.cancel?.();
 
     const weeklyRemaining = Math.max(0, Math.round(weeklyTarget - weekLoad));
     const weekDone = Math.max(0, Math.min(weeklyTarget, weekLoad));
 
     let weekPercent = 0;
-    if (weeklyTarget > 0) {
-      weekPercent = Math.round((weekDone / weeklyTarget) * 100);
-    }
+    if (weeklyTarget > 0) weekPercent = Math.round((weekDone / weeklyTarget) * 100);
     weekPercent = Math.max(0, Math.min(200, weekPercent));
 
     let weekBarFilled = 0;
-    if (weeklyTarget > 0) {
-      weekBarFilled = Math.round((weekDone / weeklyTarget) * 10);
-    }
+    if (weeklyTarget > 0) weekBarFilled = Math.round((weekDone / weeklyTarget) * 10);
     weekBarFilled = Math.max(0, Math.min(10, weekBarFilled));
     const weekBar = "█".repeat(weekBarFilled) + "░".repeat(10 - weekBarFilled);
 
@@ -915,35 +828,30 @@ async function handle(env) {
     );
 
     const ctlLoadByDate = new Map();
-    for (const day of weekArr) {
-      if (day.id && day.ctlLoad != null) {
-        ctlLoadByDate.set(day.id, day.ctlLoad);
-      }
+    for (const d of weekArr) {
+      if (d.id && d.ctlLoad != null) ctlLoadByDate.set(d.id, d.ctlLoad);
     }
 
     let daysSinceLastTraining = daysSinceMonday + 1;
-    for (let offset2 = 0; offset2 <= daysSinceMonday; offset2++) {
+    for (let o = 0; o <= daysSinceMonday; o++) {
       const d = new Date(todayDate);
-      d.setUTCDate(d.getUTCDate() - offset2);
+      d.setUTCDate(d.getUTCDate() - o);
       const id = d.toISOString().slice(0, 10);
       const load = ctlLoadByDate.get(id) ?? 0;
       if (load > 0) {
-        daysSinceLastTraining = offset2;
+        daysSinceLastTraining = o;
         break;
       }
     }
 
     let consecutiveTrainingDays = 0;
-    for (let offset3 = 1; offset3 <= daysSinceMonday; offset3++) {
+    for (let o = 1; o <= daysSinceMonday; o++) {
       const d = new Date(todayDate);
-      d.setUTCDate(d.getUTCDate() - offset3);
+      d.setUTCDate(d.getUTCDate() - o);
       const id = d.toISOString().slice(0, 10);
       const load = ctlLoadByDate.get(id) ?? 0;
-      if (load > 0) {
-        consecutiveTrainingDays++;
-      } else {
-        break;
-      }
+      if (load > 0) consecutiveTrainingDays++;
+      else break;
     }
 
     const yesterdayDate = new Date(todayDate);
@@ -958,57 +866,52 @@ async function handle(env) {
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
 
-    // 6) Lernendes Wochentagsmuster (Idee 1)
+    // 6) Lernendes Wochentagsmuster
     let stats = await loadRawPattern(env, athleteId, authHeader, todayDate);
     stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
     const weekdayWeights = normalizePattern(stats);
 
-    // 7) Wochenplan laden (oder Default setzen)
+    // 7) Wochenplan
     let loadedPlan = await loadWeekPlan(env, mondayStr);
-    let planWeights = null;
-    let planString = null;
+    let planWeights;
+    let planString;
     let planIsDefault = false;
 
     if (loadedPlan) {
       planWeights = loadedPlan.weights;
       planString = loadedPlan.planString;
     } else {
-      // ❗ Kein Plan in KV → Default-Plan Mo,Mi,Fr,So
       planWeights = [0.25, 0.0, 0.25, 0.0, 0.25, 0.0, 0.25];
       planString = "Mo,Mi,Fr,So";
       planIsDefault = true;
       await saveWeekPlan(env, mondayStr, planWeights, planString);
     }
 
-    // Plan-String in die Woche hineinschreiben (nur leere Felder)
-    await ensureDailyTypePlanForWeek(env, mondayStr, planString, todayDate);
+    // Plan-String in leere TagesTyp-Felder schreiben
+    await ensureDailyTypePlanForWeek(env, mondayStr, planString, authHeader);
 
-    // 7b) Mid-Week-Override: Wenn du `TagesTyp` geändert hast → neuen Plan übernehmen
+    // Mid-Week-Override: wenn du TagesTyp geändert hast
     const oldPlanString = planString;
-    const todaysStr = todaysDailyType;
-
-    if (todaysStr && todaysStr !== oldPlanString) {
-      const selected = parseTrainingDays(todaysStr);
+    if (todaysDailyType && todaysDailyType !== oldPlanString) {
+      const selected = parseTrainingDays(todaysDailyType);
       const count = selected.filter(Boolean).length;
       if (count > 0) {
         const per = 1.0 / count;
         const newWeights = new Array(7).fill(0);
-        for (let i = 0; i < 7; i++) {
-          if (selected[i]) newWeights[i] = per;
-        }
-        // KV updaten
-        await saveWeekPlan(env, mondayStr, newWeights, todaysStr);
-        // Restwoche in den Feldern anpassen
+        for (let i = 0; i < 7; i++) if (selected[i]) newWeights[i] = per;
+
+        await saveWeekPlan(env, mondayStr, newWeights, todaysDailyType);
         await propagatePlanStringForRestOfWeek(
           env,
           mondayStr,
           oldPlanString,
-          todaysStr,
-          todayDate
+          todaysDailyType,
+          todayDate,
+          authHeader
         );
-        // und lokal für diesen Lauf verwenden
+
         planWeights = newWeights;
-        planString = todaysStr;
+        planString = todaysDailyType;
         planIsDefault = false;
       }
     }
@@ -1020,11 +923,9 @@ async function handle(env) {
 
     if (planWeights) {
       const weightToday = planWeights[dayIdx] ?? 0;
-
       if (weightToday > 0) {
         plannedTodayBase = weeklyTarget * weightToday;
 
-        // geplante Restlast ab heute:
         let plannedRemainingBase = 0;
         for (let i = dayIdx; i < 7; i++) {
           const w = planWeights[i] ?? 0;
@@ -1032,10 +933,8 @@ async function handle(env) {
         }
 
         const trueRemaining = Math.max(0, weeklyTarget - weekLoadUntilYesterday);
-
         if (plannedRemainingBase > 0) {
           scaleFactor = trueRemaining / plannedRemainingBase;
-          // sanfte Grenzen
           if (scaleFactor < 0.5) scaleFactor = 0.5;
           if (scaleFactor > 1.5) scaleFactor = 1.5;
         } else {
@@ -1044,8 +943,7 @@ async function handle(env) {
 
         targetFromWeek = plannedTodayBase * scaleFactor;
       } else {
-        // Heute kein geplanter Trainingstag laut Plan → sehr kleine Wochen-Komponente
-        targetFromWeek = weeklyTarget * 0.02; // praktisch: fast Ruhetag
+        targetFromWeek = weeklyTarget * 0.02;
       }
     } else {
       targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
@@ -1065,15 +963,9 @@ async function handle(env) {
     let microFactor = 1.0;
     let suggestRestDay = false;
 
-    if (yesterdayLoad === 0 && tsb >= 0) {
-      microFactor *= 1.10;
-    }
-    if (daysSinceLastTraining >= 2 && tsb >= 0) {
-      microFactor *= 1.25;
-    }
-    if (daysSinceLastTraining >= 3 && tsb >= 0) {
-      microFactor *= 1.10;
-    }
+    if (yesterdayLoad === 0 && tsb >= 0) microFactor *= 1.10;
+    if (daysSinceLastTraining >= 2 && tsb >= 0) microFactor *= 1.25;
+    if (daysSinceLastTraining >= 3 && tsb >= 0) microFactor *= 1.10;
 
     let fatigueFactor = 1.0;
     if (consecutiveTrainingDays >= 3) fatigueFactor = Math.min(fatigueFactor, 0.8);
@@ -1118,11 +1010,8 @@ async function handle(env) {
       if ((planWeights?.[i] ?? 0) > 0) plannedNames.push(DAY_NAMES[i]);
     }
     let plannedDaysText = plannedNames.join(",");
-    if (planIsDefault) {
-      plannedDaysText += " (Default)";
-    }
+    if (planIsDefault) plannedDaysText += " (Default)";
 
-    // Rechendetails fürs Muster
     const patternLine = weekdayWeights.map((v) => v.toFixed(2)).join(" ");
     const shareTodayPct = (weekdayWeights[dayIdx] * 100).toFixed(1);
     const trainCountToday = stats.trainCount?.[dayIdx] ?? 0;
@@ -1135,7 +1024,7 @@ async function handle(env) {
     const avgIfTrainToday =
       trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
 
-        const commentText = `Tagesziel-Erklärung
+    const commentText = `Tagesziel-Erklärung
 
 Woche:
 Ziel ${weeklyTarget} TSS
@@ -1168,8 +1057,6 @@ dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 Tagesziel = ${tssTarget} TSS
 Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
 
-    // 👉 Ab hier sauber, nur EIN emojiToday, EIN updateRes etc.
-    const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
     const payloadToday = {
@@ -1209,15 +1096,6 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
       `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}`,
       { status: 200 }
     );
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    return new Response(
-      "Unexpected error: " + (err && err.stack ? err.stack : String(err)),
-      { status: 500 }
-    );
-  }
-}
-
   } catch (err) {
     console.error("Unexpected error:", err);
     return new Response(
