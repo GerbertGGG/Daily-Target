@@ -4,11 +4,11 @@ const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
-const INTERVALS_TARGET_FIELD = "TageszielTSS";   // dynamisches Tagesziel
-const INTERVALS_PLAN_FIELD = "WochenPlan";       // kurzer Plan-Text
-const WEEKLY_TARGET_FIELD = "WochenzielTSS";     // Wochenziel
-const DAILY_TYPE_FIELD = "TagesTyp";            // dein Plan-String (z.B. "Mo,Mi,Fr,So")
-const INTERVALS_DAILY_PLAN_FIELD = "TageszielPlan"; // geplanter TSS für den Tag
+const INTERVALS_TARGET_FIELD = "TageszielTSS";        // dynamisches Tagesziel
+const INTERVALS_PLAN_FIELD = "WochenPlan";            // kurzer Plan-Text
+const WEEKLY_TARGET_FIELD = "WochenzielTSS";          // Wochenziel
+const DAILY_TYPE_FIELD = "TagesTyp";                 // dein Plan-String (z.B. "Mo,Mi,Fr,So")
+const INTERVALS_DAILY_PLAN_FIELD = "TageszielPlan";   // geplanter TSS für den Tag
 
 // Fallback: angenommene Anzahl Trainingstage pro Woche (nur für Caps etc.)
 const TRAINING_DAYS_PER_WEEK = 4.0;
@@ -1103,6 +1103,14 @@ async function handle(env) {
     const avgIfTrainToday =
       trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
 
+    // Plan-TSS für heute (TageszielPlan)
+    let planTssToday = 0;
+    if (planWeights && weeklyTarget > 0) {
+      const wToday = planWeights[dayIdx] ?? 0;
+      planTssToday = Math.round(weeklyTarget * wToday);
+      if (planTssToday < 5) planTssToday = 0;
+    }
+
     const commentText = `Tagesziel-Erklärung
 
 Woche:
@@ -1142,7 +1150,8 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
       id: today,
       [INTERVALS_TARGET_FIELD]: tssTarget,
       [INTERVALS_PLAN_FIELD]: planTextToday,
-      comments: commentText
+      comments: commentText,
+      [INTERVALS_DAILY_PLAN_FIELD]: planTssToday
     };
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
@@ -1172,7 +1181,7 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
     }
 
     return new Response(
-      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}`,
+      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}, planTssToday=${planTssToday}`,
       { status: 200 }
     );
   } catch (err) {
