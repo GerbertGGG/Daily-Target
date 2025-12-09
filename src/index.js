@@ -1,4 +1,9 @@
 const BASE_URL = "https://intervals.icu/api/v1";
+// KV-Key für das Muster (neu, damit wir sauber starten)
+const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";
+
+// Ab wann zählt ein Tag als „Traininstag“ (TSS-Schwelle)
+const TRAIN_THRESHOLD = 5;
 
 // 🔥 Hardcoded Variablen – später ideal als Secrets/KV hinterlegen
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
@@ -29,20 +34,63 @@ const PATTERN_ALPHA = 0.7;
 // noch nicht super aggressiv genutzt
 // ---------------------------------------------------------
 
-function normalizePattern(rawPattern) {
-  let sum = rawPattern.reduce((a, b) => a + b, 0);
-  if (sum <= 0) {
-    // absoluter Fallback: gleichmäßig
-    rawPattern = [1, 1, 1, 1, 1, 1, 1];
-    sum = 7;
+// ---------------------------------------------------------
+// Lernendes Wochentagsmuster (Idee 1: P(Training) + Ø-Load)
+// ---------------------------------------------------------
+
+// stats-Objekt: { trainCount: number[7], sumLoad: number[7], weeks: number }
+
+// Aus Stats ein Gewichts-Muster Mo..So ableiten
+function normalizePattern(stats) {
+  // Backwards-Kompatibilität: falls noch ein altes Array drin liegt
+  if (Array.isArray(stats)) {
+    const arr = stats.map((v) => (typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0));
+    let sum = arr.reduce((a, b) => a + b, 0);
+    if (sum <= 0) {
+      return [1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7];
+    }
+    return arr.map((v) => v / sum);
   }
-  return rawPattern.map((v) => (sum > 0 ? v / sum : 0));
+
+  const trainCount = stats.trainCount ?? [];
+  const sumLoad = stats.sumLoad ?? [];
+  const weeks = stats.weeks ?? 1;
+
+  const scores = new Array(7).fill(0);
+
+  for (let i = 0; i < 7; i++) {
+    const tc = trainCount[i] ?? 0;
+    const sl = sumLoad[i] ?? 0;
+    const w = weeks > 0 ? weeks : 1;
+
+    // P(Training an diesem Tag) ~ wie viele Wochen mit Training dort
+    let pTrain = tc / w;
+    if (pTrain > 1) pTrain = 1; // Safety
+
+    // Ø-Load, wenn trainiert wurde
+    const avgIfTrain = tc > 0 ? sl / tc : 0;
+
+    // Erwartete Last dieses Wochentags
+    scores[i] = pTrain * avgIfTrain;
+  }
+
+  let sumScores = scores.reduce((a, b) => a + b, 0);
+  if (sumScores <= 0) {
+    return [1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7];
+  }
+
+  return scores.map((v) => v / sumScores);
 }
 
+// Initialisierung der Stats aus der History (z.B. letzte 12 Wochen)
 async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDate) {
   if (!env || !env.KV || !env.KV.put) {
-    console.warn("KV binding missing in init – using simple equal fallback pattern.");
-    return [1, 1, 1, 1, 1, 1, 1];
+    console.warn("KV binding missing in init – using fallback stats.");
+    return {
+      trainCount: new Array(7).fill(1),
+      sumLoad: new Array(7).fill(1),
+      weeks: 4
+    };
   }
 
   const HISTORY_WEEKS_INIT = 12;
@@ -51,7 +99,8 @@ async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDa
   const oldest = startDate.toISOString().slice(0, 10);
   const newest = todayDate.toISOString().slice(0, 10);
 
-  let rawPattern = new Array(7).fill(0); // Mo..So
+  const trainCount = new Array(7).fill(0);
+  const sumLoad = new Array(7).fill(0);
 
   try {
     const histRes = await fetch(
@@ -62,14 +111,17 @@ async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDa
       const histArr = await histRes.json();
       for (const d of histArr) {
         if (!d.id || d.ctlLoad == null) continue;
+        const load = d.ctlLoad;
         const dateObj = new Date(d.id + "T00:00:00Z");
         if (isNaN(dateObj.getTime())) continue;
         const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
-        let idx;
-        if (wd === 0) idx = 6; // So -> 6
-        else idx = wd - 1;     // Mo->0, Di->1, ...
+        const idx = wd === 0 ? 6 : wd - 1; // Mo..So = 0..6
+
         if (idx >= 0 && idx < 7) {
-          rawPattern[idx] += d.ctlLoad;
+          if (load >= TRAIN_THRESHOLD) {
+            trainCount[idx] += 1;
+            sumLoad[idx] += load;
+          }
         }
       }
     } else if (histRes.body) {
@@ -79,62 +131,112 @@ async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDa
     console.error("Error in initWeekdayPatternFromHistory:", e);
   }
 
-  let sum = rawPattern.reduce((a, b) => a + b, 0);
-  if (sum <= 0) {
-    rawPattern = [1, 1, 1, 1, 1, 1, 1];
-  }
+  const stats = {
+    trainCount,
+    sumLoad,
+    weeks: HISTORY_WEEKS_INIT
+  };
 
-  await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(rawPattern));
-  return rawPattern;
+  await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(stats));
+  return stats;
 }
 
+// Stats aus KV holen (oder initialisieren)
 async function loadRawPattern(env, athleteId, authHeader, todayDate) {
   if (!env || !env.KV || !env.KV.get) {
-    console.warn("KV binding missing – using simple equal fallback pattern.");
-    return [1, 1, 1, 1, 1, 1, 1];
+    console.warn("KV binding missing – using simple fallback stats.");
+    return {
+      trainCount: new Array(7).fill(1),
+      sumLoad: new Array(7).fill(1),
+      weeks: 4
+    };
   }
 
-  let rawStr = await env.KV.get(WEEKDAY_PATTERN_KEY);
+  const rawStr = await env.KV.get(WEEKDAY_PATTERN_KEY);
   if (!rawStr) {
+    // erstmalig: aus History initialisieren
     return await initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDate);
   }
+
   try {
-    const arr = JSON.parse(rawStr);
-    if (Array.isArray(arr) && arr.length === 7) {
-      return arr.map((v) => (typeof v === "number" && isFinite(v) ? v : 0));
+    const parsed = JSON.parse(rawStr);
+
+    // Neuer Typ: Objekt mit trainCount/sumLoad/weeks
+    if (
+      parsed &&
+      Array.isArray(parsed.trainCount) &&
+      Array.isArray(parsed.sumLoad)
+    ) {
+      if (typeof parsed.weeks !== "number" || !isFinite(parsed.weeks)) {
+        parsed.weeks = 4;
+      }
+      return parsed;
+    }
+
+    // Alt: reines Array → vorsichtig in neue Stats überführen
+    if (Array.isArray(parsed)) {
+      const arr = parsed.map((v) => (typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0));
+      const trainCount = arr.map((v) => (v >= TRAIN_THRESHOLD ? 1 : 0));
+      const sumLoad = arr.slice();
+      const stats = {
+        trainCount,
+        sumLoad,
+        weeks: 4
+      };
+      await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(stats));
+      return stats;
     }
   } catch (e) {
-    console.error("Error parsing weekdayPatternRaw from KV:", e);
+    console.error("Error parsing weekday stats from KV:", e);
   }
-  const rawPattern = [1, 1, 1, 1, 1, 1, 1];
-  await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(rawPattern));
-  return rawPattern;
+
+  // Fallback, wenn KV kaputt
+  const stats = {
+    trainCount: new Array(7).fill(1),
+    sumLoad: new Array(7).fill(1),
+    weeks: 4
+  };
+  await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(stats));
+  return stats;
 }
 
-async function updatePatternWithYesterday(env, rawPattern, yesterdayDate, yesterdayLoad) {
+// Stats mit gestrigem Load updaten (einfaches Zählen)
+async function updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad) {
   if (!yesterdayDate || yesterdayLoad == null) {
-    return rawPattern;
+    return stats;
   }
 
   const d = yesterdayDate;
   const wd = d.getUTCDay(); // 0=So,1=Mo...
-  let idx;
-  if (wd === 0) idx = 6;
-  else idx = wd - 1;
+  const idx = wd === 0 ? 6 : wd - 1;
+
+  if (!stats || typeof stats !== "object") {
+    stats = {
+      trainCount: new Array(7).fill(0),
+      sumLoad: new Array(7).fill(0),
+      weeks: 4
+    };
+  }
+
+  if (!Array.isArray(stats.trainCount)) stats.trainCount = new Array(7).fill(0);
+  if (!Array.isArray(stats.sumLoad)) stats.sumLoad = new Array(7).fill(0);
+  if (typeof stats.weeks !== "number" || !isFinite(stats.weeks)) stats.weeks = 4;
 
   if (idx >= 0 && idx < 7) {
-    const old = rawPattern[idx] ?? 0;
     const load = Math.max(0, yesterdayLoad);
-    const updated = PATTERN_ALPHA * old + (1 - PATTERN_ALPHA) * load;
-    rawPattern[idx] = updated;
+    if (load >= TRAIN_THRESHOLD) {
+      stats.trainCount[idx] = (stats.trainCount[idx] ?? 0) + 1;
+      stats.sumLoad[idx] = (stats.sumLoad[idx] ?? 0) + load;
+    }
   }
 
   if (env && env.KV && env.KV.put) {
-    await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(rawPattern));
+    await env.KV.put(WEEKDAY_PATTERN_KEY, JSON.stringify(stats));
   }
 
-  return rawPattern;
+  return stats;
 }
+
 
 // ---------------------------------------------------------
 // Hilfsfunktionen Training / Müdigkeit / Taper
@@ -552,10 +654,27 @@ async function handle(env) {
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
 
-    // 6) Lernendes Wochentagsmuster (nur gepflegt, nicht stark genutzt)
-    let rawPattern = await loadRawPattern(env, athleteId, authHeader, todayDate);
-    rawPattern = await updatePatternWithYesterday(env, rawPattern, yesterdayDate, yesterdayLoad);
-    const weekdayWeights = normalizePattern(rawPattern);
+    let stats = await loadRawPattern(env, athleteId, authHeader, todayDate);
+stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
+const weekdayWeights = normalizePattern(stats);
+
+// ...
+
+// 7) Tagesziel – musterbasierte Verteilung
+let targetFromWeek;
+{
+  const jsDay = weekday;                      // 0 = So, 1 = Mo, ...
+  const dayIdx = jsDay === 0 ? 6 : jsDay - 1; // Mo..So = 0..6
+  const weightToday = weekdayWeights[dayIdx] ?? 0;
+  const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
+
+  if (sumWeights > 0 && weightToday > 0) {
+    targetFromWeek = weeklyTarget * weightToday;
+  } else {
+    targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+  }
+}
+
 
     // 7) 
 // 7) Tagesziel – jetzt mit lernender Wochenverteilung
@@ -641,6 +760,21 @@ const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 // Kurzfassung fürs Muster im Kommentar
 const patternLine = weekdayWeights.map(v => v.toFixed(2)).join(" ");
 const shareTodayPct = (weekdayWeights[(weekday === 0 ? 6 : weekday - 1)] * 100).toFixed(1);
+const jsDay = weekday;
+const dayIdx = jsDay === 0 ? 6 : jsDay - 1;
+
+// Musterzeile (Gewichte)
+const patternLine = weekdayWeights.map(v => v.toFixed(2)).join(" ");
+
+// Anteil heutiger Tag an der Wochenlast (aus den Gewichten)
+const shareTodayPct = (weekdayWeights[dayIdx] * 100).toFixed(1);
+
+// Stats für Heute (Idee 1)
+const trainCountToday = stats.trainCount?.[dayIdx] ?? 0;
+const weeksStats = stats.weeks ?? 1;
+const pTrainToday = Math.min(1, weeksStats > 0 ? trainCountToday / weeksStats : 0);
+const sumLoadTodayStat = stats.sumLoad?.[dayIdx] ?? 0;
+const avgIfTrainToday = trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
 
     const commentText = `Tagesziel-Erklärung
 
@@ -658,10 +792,14 @@ Gestern ${yesterdayLoad.toFixed(1)} TSS, Vorgestern ${twoDaysAgoLoad.toFixed(1)}
 2-Tage-Load ${last2DaysLoad.toFixed(1)} TSS
 Empfehlung: ${suggestRestDay ? "eher Ruhetag/locker" : "normale Belastung ok"}
 
-Rechenweg:
-Muster Mo–So (normiert): ${patternLine}
+Lernendes Muster (Idee 1):
+Gewichte Mo–So: ${patternLine}
 Anteil heute: ${shareTodayPct}% der Wochenlast
-=> targetFromWeek ≈ ${targetFromWeek.toFixed(1)} TSS
+Train-Wahrsch. heute ~ ${(pTrainToday * 100).toFixed(0)}%
+Ø-Load, wenn Training: ${avgIfTrainToday.toFixed(1)} TSS
+
+Rechenweg:
+targetFromWeek ≈ ${targetFromWeek.toFixed(1)} TSS
 baseFromFitness = ${baseFromFitness.toFixed(1)}
 combinedBase = ${combinedBase.toFixed(1)}
 tsbFactor = ${tsbFactor}, microFactor = ${microFactor.toFixed(2)}
@@ -669,6 +807,7 @@ dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 
 Tagesziel = ${tssTarget} TSS
 Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
+
 
 
 
