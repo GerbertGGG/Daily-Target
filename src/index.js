@@ -4,13 +4,12 @@ const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
-const INTERVALS_TARGET_FIELD = "TageszielTSS";        // dynamisches Tagesziel
-const INTERVALS_PLAN_FIELD = "WochenPlan";            // kurzer Plan-Text
-const WEEKLY_TARGET_FIELD = "WochenzielTSS";          // Wochenziel
-const DAILY_TYPE_FIELD = "TagesTyp";                 // dein Plan-String (z.B. "Mo,Mi,Fr,So")
-const INTERVALS_DAILY_PLAN_FIELD = "TageszielPlan";   // geplanter TSS für den Tag
+const INTERVALS_TARGET_FIELD = "TageszielTSS";  // dynamisches Tagesziel
+const INTERVALS_PLAN_FIELD = "WochenPlan";      // kurzer Plan-Text
+const WEEKLY_TARGET_FIELD = "WochenzielTSS";    // Wochenziel
+const DAILY_TYPE_FIELD = "TagesTyp";            // dein Plan-String (z.B. "Mo,Mi,Fr,So")
 
-// Fallback: angenommene Anzahl Trainingstage pro Woche (nur für Caps etc.)
+// Fallback: angenommene Anzahl Trainingstage pro Woche (für Caps etc.)
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
 // Taper-Konstanten (für Events)
@@ -20,9 +19,9 @@ const TAPER_DAILY_START = 0.8;
 const TAPER_DAILY_END = 0.3;
 
 // KV-Keys
-const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";         // lernendes Muster (Idee 1)
-const WEEKPLAN_PREFIX = "weekPlan:";                   // Wochenplan: weekPlan:YYYY-MM-DD
-const WEEKPLAN_STRING_PREFIX = "weekPlanString:";      // Klartext-Plan: "Mo,Mi,Do,Sa"
+const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";    // lernendes Muster (Idee 1)
+const WEEKPLAN_PREFIX = "weekPlan:";             // Wochenplan: weekPlan:YYYY-MM-DD
+const WEEKPLAN_STRING_PREFIX = "weekPlanString:";// Klartext-Plan: "Mo,Mi,Do,Sa"
 
 // Ab wann zählt ein Tag als „Trainingstag“ (TSS-Schwelle)
 const TRAIN_THRESHOLD = 5;
@@ -78,7 +77,7 @@ function parseTrainingDays(str) {
 // Lernendes Wochentagsmuster (Idee 1: P(Training) + Ø-Load)
 // ---------------------------------------------------------
 
-// stats-Objekt: { trainCount: number[7], sumLoad: number[7], weeks: number }
+// stats: { trainCount: number[7], sumLoad: number[7], weeks: number }
 
 function normalizePattern(stats) {
   // Backwards-Kompatibilität: falls noch ein altes Array drin liegt
@@ -106,7 +105,6 @@ function normalizePattern(stats) {
     if (pTrain > 1) pTrain = 1;
 
     const avgIfTrain = tc > 0 ? sl / tc : 0;
-
     scores[i] = pTrain * avgIfTrain;
   }
 
@@ -116,7 +114,6 @@ function normalizePattern(stats) {
   return scores.map((v) => v / sumScores);
 }
 
-// Initialisierung der Stats aus der History (z.B. letzte 12 Wochen)
 async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDate) {
   if (!env || !env.KV || !env.KV.put) {
     console.warn("KV binding missing in init – using fallback stats.");
@@ -172,7 +169,6 @@ async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDa
   return stats;
 }
 
-// Stats aus KV holen (oder initialisieren)
 async function loadRawPattern(env, athleteId, authHeader, todayDate) {
   if (!env || !env.KV || !env.KV.get) {
     console.warn("KV binding missing – using simple fallback stats.");
@@ -229,7 +225,6 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
   return stats;
 }
 
-// Stats mit gestrigem Load updaten
 async function updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad) {
   if (!yesterdayDate || yesterdayLoad == null) return stats;
 
@@ -464,7 +459,7 @@ async function loadWeekPlan(env, mondayStr) {
   return { weights, planString };
 }
 
-// Am Sonntag: dein `TagesTyp` ist der Plan für die NÄCHSTE Woche
+// Sonntag: dein `TagesTyp` ist der Plan für die NÄCHSTE Woche
 async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday, authHeader) {
   if (!env || !env.KV || !env.KV.put) return null;
 
@@ -607,62 +602,6 @@ async function propagatePlanStringForRestOfWeek(
   }
 }
 
-// Plan-Tagesziele (TageszielPlan) für eine Woche / Restwoche schreiben
-async function writePlannedDailyTargetsForWeekRange(
-  athleteId,
-  authHeader,
-  mondayStr,
-  weeklyTarget,
-  planWeights,
-  startDayIdx // 0=Mo..6=So, ab welchem Wochentag neu geschrieben wird
-) {
-  if (!weeklyTarget || !planWeights || planWeights.length !== 7) return;
-
-  const mondayDate = new Date(mondayStr + "T00:00:00Z");
-  if (isNaN(mondayDate.getTime())) return;
-
-  const start = Math.max(0, Math.min(6, startDayIdx ?? 0));
-
-  for (let i = start; i < 7; i++) {
-    const d = new Date(mondayDate);
-    d.setUTCDate(d.getUTCDate() + i);
-    const id = d.toISOString().slice(0, 10);
-
-    const w = planWeights[i] ?? 0;
-    let tssPlan = Math.round(weeklyTarget * w);
-
-    if (tssPlan < 5) tssPlan = 0;
-
-    const payload = {
-      id,
-      [INTERVALS_DAILY_PLAN_FIELD]: tssPlan
-    };
-
-    try {
-      const res = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${id}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payload)
-        }
-      );
-      if (!res.ok && res.body) {
-        res.body.cancel?.();
-      }
-    } catch (e) {
-      console.error(
-        "writePlannedDailyTargetsForWeekRange error:",
-        id,
-        e
-      );
-    }
-  }
-}
-
 // ---------------------------------------------------------
 // HAUPTLOGIK
 // ---------------------------------------------------------
@@ -728,9 +667,7 @@ async function handle(env) {
       await storeNextWeekPlanFromSunday(env, todayDate, wellness, authHeader);
     }
 
-    const weekClass = classifyWeek(ctl, atl, rampRate);
-    const weekState = weekClass.state;
-    const tsb = weekClass.tsb;
+    const { state: weekState, tsb } = classifyWeek(ctl, atl, rampRate);
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
     // 2) Montag-Werte
@@ -923,6 +860,8 @@ async function handle(env) {
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
 
+    const todayLoad = ctlLoadByDate.get(today) ?? 0;
+
     // 6) Lernendes Wochentagsmuster
     let stats = await loadRawPattern(env, athleteId, authHeader, todayDate);
     stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
@@ -944,10 +883,8 @@ async function handle(env) {
       await saveWeekPlan(env, mondayStr, planWeights, planString);
     }
 
-    // Plan-String in leere TagesTyp-Felder schreiben
     await ensureDailyTypePlanForWeek(env, mondayStr, planString, authHeader);
 
-    // Mid-Week-Override: wenn du TagesTyp geändert hast
     const oldPlanString = planString;
     if (todaysDailyType && todaysDailyType !== oldPlanString) {
       const selected = parseTrainingDays(todaysDailyType);
@@ -970,34 +907,15 @@ async function handle(env) {
         planWeights = newWeights;
         planString = todaysDailyType;
         planIsDefault = false;
-
-        // Plan-Tagesziele ab heute für den Rest der Woche neu schreiben
-        await writePlannedDailyTargetsForWeekRange(
-          athleteId,
-          authHeader,
-          mondayStr,
-          weeklyTarget,
-          planWeights,
-          dayIdx
-        );
       }
     }
 
-    // Montag: falls Woche zum ersten Mal ein Wochenziel bekommt → Plan für ganze Woche schreiben
-    if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
-      await writePlannedDailyTargetsForWeekRange(
-        athleteId,
-        authHeader,
-        mondayStr,
-        weeklyTarget,
-        planWeights,
-        0
-      );
-    }
-
-    // 8) Tagesziel – aus Wochenplan mit Umverteilung
+    // 8) Tagesziel – aus Wochenplan mit Umverteilung + Entschärfung (C)
     let targetFromWeek;
     let plannedTodayBase = 0;
+    let plannedRemainingBase = 0;
+    let trueRemaining = Math.max(0, weeklyTarget - weekLoadUntilYesterday);
+    let remainingRatio = weeklyTarget > 0 ? trueRemaining / weeklyTarget : 1.0;
     let scaleFactor = 1.0;
 
     if (planWeights) {
@@ -1005,23 +923,35 @@ async function handle(env) {
       if (weightToday > 0) {
         plannedTodayBase = weeklyTarget * weightToday;
 
-        let plannedRemainingBase = 0;
         for (let i = dayIdx; i < 7; i++) {
           const w = planWeights[i] ?? 0;
           plannedRemainingBase += weeklyTarget * w;
         }
 
-        const trueRemaining = Math.max(0, weeklyTarget - weekLoadUntilYesterday);
         if (plannedRemainingBase > 0) {
           scaleFactor = trueRemaining / plannedRemainingBase;
-          if (scaleFactor < 0.5) scaleFactor = 0.5;
-          if (scaleFactor > 1.5) scaleFactor = 1.5;
         } else {
           scaleFactor = 1.0;
         }
 
+        // ursprüngliche Klammer 0.5–1.5
+        if (scaleFactor < 0.5) scaleFactor = 0.5;
+        if (scaleFactor > 1.5) scaleFactor = 1.5;
+
+        // C) Wenn nur noch ≤40% des Wochenziels offen sind,
+        // Rest der Woche bewusst entschärfen
+        if (remainingRatio <= 0.4) {
+          // nie hochskalieren
+          if (scaleFactor > 1.0) scaleFactor = 1.0;
+          // wenn du nicht positiv im TSB bist → noch defensiver
+          if (tsb <= 0) {
+            scaleFactor = Math.min(scaleFactor, 0.8);
+          }
+        }
+
         targetFromWeek = plannedTodayBase * scaleFactor;
       } else {
+        // kein geplanter Trainingstag heute → kleiner „Restpuffer“
         targetFromWeek = weeklyTarget * 0.02;
       }
     } else {
@@ -1103,14 +1033,6 @@ async function handle(env) {
     const avgIfTrainToday =
       trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
 
-    // Plan-TSS für heute (TageszielPlan)
-    let planTssToday = 0;
-    if (planWeights && weeklyTarget > 0) {
-      const wToday = planWeights[dayIdx] ?? 0;
-      planTssToday = Math.round(weeklyTarget * wToday);
-      if (planTssToday < 5) planTssToday = 0;
-    }
-
     const commentText = `Tagesziel-Erklärung
 
 Woche:
@@ -1125,6 +1047,7 @@ Wochentyp ${weekState} | Taper ${inTaper ? "Ja" : "Nein"}
 Mikro:
 Tage seit letztem Training ${daysSinceLastTraining}, Serie ${consecutiveTrainingDays}
 Gestern ${yesterdayLoad.toFixed(1)} TSS, Vorgestern ${twoDaysAgoLoad.toFixed(1)} TSS
+Heute bisher: ${todayLoad.toFixed(1)} TSS (vs. Plan ≈ ${targetFromWeek.toFixed(1)} TSS)
 2-Tage-Load ${last2DaysLoad.toFixed(1)} TSS
 Empfehlung: ${suggestRestDay ? "eher Ruhetag/locker" : "normale Belastung ok"}
 
@@ -1134,8 +1057,15 @@ Anteil heute (Auto-Muster): ${shareTodayPct}% der Wochenlast
 Train-Wahrsch. heute ~ ${(pTrainToday * 100).toFixed(0)}%
 Ø-Load, wenn Training: ${avgIfTrainToday.toFixed(1)} TSS
 
-Rechenweg:
-targetFromWeek (Plan) ≈ ${targetFromWeek.toFixed(1)} TSS
+Rechenweg (Plan vs. Ist):
+plannedTodayBase (roh) = ${plannedTodayBase.toFixed(1)} TSS
+plannedRemainingBase (Plan Restwoche) = ${plannedRemainingBase.toFixed(1)} TSS
+trueRemaining (Ist Restwoche vor heute) = ${trueRemaining.toFixed(1)} TSS
+remainingRatio = ${(remainingRatio * 100).toFixed(0)}%
+scaleFactor (Umverteilung) = ${scaleFactor.toFixed(2)}
+targetFromWeek (Plan+Umverteilung) = ${targetFromWeek.toFixed(1)} TSS
+
+Rechenweg (Tagesziel):
 baseFromFitness = ${baseFromFitness.toFixed(1)}
 combinedBase = ${combinedBase.toFixed(1)}
 tsbFactor = ${tsbFactor}, microFactor = ${microFactor.toFixed(2)}
@@ -1150,8 +1080,7 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
       id: today,
       [INTERVALS_TARGET_FIELD]: tssTarget,
       [INTERVALS_PLAN_FIELD]: planTextToday,
-      comments: commentText,
-      [INTERVALS_DAILY_PLAN_FIELD]: planTssToday
+      comments: commentText
     };
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
@@ -1181,7 +1110,7 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
     }
 
     return new Response(
-      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}, planTssToday=${planTssToday}`,
+      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}`,
       { status: 200 }
     );
   } catch (err) {
