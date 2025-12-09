@@ -1,14 +1,14 @@
-const INTERVALS_DAILY_PLAN_FIELD = "TageszielPlan"; // numerisches Custom-Feld in Wellness
-
 const BASE_URL = "https://intervals.icu/api/v1";
-const INTERVALS_DAILY_PLAN_FIELD = "TageszielPlan"; // neuer Plan-Output
+
 // 🔥 Hardcoded Variablen – später ideal als Secrets/KV hinterlegen
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
-const INTERVALS_TARGET_FIELD = "TageszielTSS";
-const INTERVALS_PLAN_FIELD = "WochenPlan";
-const WEEKLY_TARGET_FIELD = "WochenzielTSS";
-const DAILY_TYPE_FIELD = "TagesTyp"; // hier definierst du deine Wochentage
+
+const INTERVALS_TARGET_FIELD = "TageszielTSS";   // dynamisches Tagesziel
+const INTERVALS_PLAN_FIELD = "WochenPlan";       // kurzer Plan-Text
+const WEEKLY_TARGET_FIELD = "WochenzielTSS";     // Wochenziel
+const DAILY_TYPE_FIELD = "TagesTyp";            // dein Plan-String (z.B. "Mo,Mi,Fr,So")
+const INTERVALS_DAILY_PLAN_FIELD = "TageszielPlan"; // geplanter TSS für den Tag
 
 // Fallback: angenommene Anzahl Trainingstage pro Woche (nur für Caps etc.)
 const TRAINING_DAYS_PER_WEEK = 4.0;
@@ -481,8 +481,7 @@ async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday, authHe
   const count = selected.filter(Boolean).length;
   if (count === 0) return null;
 
-  const weekday = jsDay; // 0=So
-  const offset = weekday === 0 ? 6 : weekday - 1;
+  const offset = jsDay === 0 ? 6 : jsDay - 1;
   const mondayThisWeek = new Date(todayDate);
   mondayThisWeek.setUTCDate(mondayThisWeek.getUTCDate() - offset);
   const nextMonday = new Date(mondayThisWeek);
@@ -608,57 +607,7 @@ async function propagatePlanStringForRestOfWeek(
   }
 }
 
-// ---------------------------------------------------------
-// HAUPTLOGIK
-// ---------------------------------------------------------
-async function writePlannedDailyTargetsForWeek(
-  athleteId,
-  authHeader,
-  mondayStr,
-  weeklyTarget,
-  planWeights
-) {
-  if (!weeklyTarget || !planWeights || planWeights.length !== 7) return;
-
-  const mondayDate = new Date(mondayStr + "T00:00:00Z");
-  if (isNaN(mondayDate.getTime())) return;
-
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(mondayDate);
-    d.setUTCDate(d.getUTCDate() + i);
-    const id = d.toISOString().slice(0, 10);
-
-    const w = planWeights[i] ?? 0;
-    let tssPlan = Math.round(weeklyTarget * w);
-
-    // ganz kleine Werte einfach 0, dann ist es klar als Ruhetag
-    if (tssPlan < 5) tssPlan = 0;
-
-    const payload = {
-      id,
-      [INTERVALS_DAILY_PLAN_FIELD]: tssPlan
-    };
-
-    try {
-      const res = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${id}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payload)
-        }
-      );
-      if (!res.ok && res.body) {
-        res.body.cancel?.();
-      }
-    } catch (e) {
-      console.error("writePlannedDailyTargetsForWeek error:", id, e);
-    }
-  }
-}
+// Plan-Tagesziele (TageszielPlan) für eine Woche / Restwoche schreiben
 async function writePlannedDailyTargetsForWeekRange(
   athleteId,
   authHeader,
@@ -682,7 +631,6 @@ async function writePlannedDailyTargetsForWeekRange(
     const w = planWeights[i] ?? 0;
     let tssPlan = Math.round(weeklyTarget * w);
 
-    // Mini-Reste als echten Ruhetag markieren
     if (tssPlan < 5) tssPlan = 0;
 
     const payload = {
@@ -714,6 +662,10 @@ async function writePlannedDailyTargetsForWeekRange(
     }
   }
 }
+
+// ---------------------------------------------------------
+// HAUPTLOGIK
+// ---------------------------------------------------------
 
 async function handle(env) {
   try {
@@ -976,7 +928,7 @@ async function handle(env) {
     stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
     const weekdayWeights = normalizePattern(stats);
 
-    // 7) Wochenplan
+    // 7) Wochenplan laden / Default / TagesTyp verteilen
     let loadedPlan = await loadWeekPlan(env, mondayStr);
     let planWeights;
     let planString;
@@ -991,31 +943,6 @@ async function handle(env) {
       planIsDefault = true;
       await saveWeekPlan(env, mondayStr, planWeights, planString);
     }
-
-    // Wenn heute Montag ist und diese Woche zum ersten Mal ein Wochenziel bekommt,
-// schreibe den Plan (TageszielPlan) für alle 7 Tage.
-if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
-  await writePlannedDailyTargetsForWeekRange(
-    athleteId,
-    authHeader,
-    mondayStr,
-    weeklyTarget,
-    planWeights,
-    0 // ab Montag
-  );
-}
-
-// Wenn heute Montag ist und diese Woche zum ersten Mal ein Wochenziel bekommt,
-// schreiben wir den Wochenplan als Tagesziel-Plan in alle 7 Tage.
-if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
-  await writePlannedDailyTargetsForWeek(
-    athleteId,
-    authHeader,
-    mondayStr,
-    weeklyTarget,
-    planWeights
-  );
-}
 
     // Plan-String in leere TagesTyp-Felder schreiben
     await ensureDailyTypePlanForWeek(env, mondayStr, planString, authHeader);
@@ -1043,21 +970,31 @@ if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
         planWeights = newWeights;
         planString = todaysDailyType;
         planIsDefault = false;
-      }
-   
-    // Neuer Plan gilt ab heute → Plan-TSS für Restwoche neu schreiben
-    const jsDay = todayDate.getUTCDay();       // 0=So..6=Sa
-    const dayIdx = jsDay === 0 ? 6 : jsDay-1;  // 0=Mo..6=So
 
-    await writePlannedDailyTargetsForWeekRange(
-      athleteId,
-      authHeader,
-      mondayStr,
-      weeklyTarget,
-      planWeights,
-      dayIdx   // ab heutigem Wochentag neu planen
-    );
- }
+        // Plan-Tagesziele ab heute für den Rest der Woche neu schreiben
+        await writePlannedDailyTargetsForWeekRange(
+          athleteId,
+          authHeader,
+          mondayStr,
+          weeklyTarget,
+          planWeights,
+          dayIdx
+        );
+      }
+    }
+
+    // Montag: falls Woche zum ersten Mal ein Wochenziel bekommt → Plan für ganze Woche schreiben
+    if (today === mondayStr && mondayWeeklyTarget == null && planWeights) {
+      await writePlannedDailyTargetsForWeekRange(
+        athleteId,
+        authHeader,
+        mondayStr,
+        weeklyTarget,
+        planWeights,
+        0
+      );
+    }
+
     // 8) Tagesziel – aus Wochenplan mit Umverteilung
     let targetFromWeek;
     let plannedTodayBase = 0;
