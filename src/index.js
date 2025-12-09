@@ -639,52 +639,37 @@ const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-    const commentText = `Erklärung zum heutigen Trainingsziel:
+    const commentText = `Tagesziel-Erklärung
 
-Wochenziel: ${weeklyTarget} TSS
-Geplante Trainingstage pro Woche (Fallback): ${TRAINING_DAYS_PER_WEEK}
+Woche:
+Ziel: ${weeklyTarget} TSS
+Fortschritt: [${weekBar}] ${weekPercent}% (${weekLoad.toFixed(1)}/${weeklyTarget})
 
-Lernendes Wochentagsmuster (Mo..So, normiert):
-${weekdayWeights.map(v => v.toFixed(3)).join(" / ")}
+Status heute:
+CTL ${ctl.toFixed(1)} | ATL ${atl.toFixed(1)} | TSB ${tsb.toFixed(1)}
+Wochentyp: ${weekState} | Taper: ${inTaper ? "Ja" : "Nein"}
 
-Vorwoche:
-Ziel letzte Woche: ${lastWeekTarget != null ? lastWeekTarget.toFixed(0) : "keine Daten"}
-Ist letzte Woche: ${lastWeekActual != null ? lastWeekActual.toFixed(1) : "keine Daten"}
+Mikrozyklus:
+Tage seit letztem Training: ${daysSinceLastTraining}
+Serien bis gestern: ${consecutiveTrainingDays}
+Gestern: ${yesterdayLoad.toFixed(1)} TSS | Vorgestern: ${twoDaysAgoLoad.toFixed(1)} TSS
+Letzte 2 Tage: ${last2DaysLoad.toFixed(1)} TSS
+Empfehlung: ${
+  suggestRestDay
+    ? "Heute eher Ruhetag/locker."
+    : "Normale Belastung ok."
+}
 
-Wochenfortschritt:
-[${weekBar}] ${weekPercent}% der Wochenlast erledigt (TSS: ${weekLoad.toFixed(1)}/${weeklyTarget})
-
-Aktuelle Fitness und Form:
-CTL: ${ctl.toFixed(1)}
-ATL: ${atl.toFixed(1)}
-TSB (Form): ${tsb.toFixed(1)}
-Wochentyp: ${weekState}
-Taperphase: ${inTaper ? "Ja" : "Nein"}
-
-Mikrozyklus dieser Woche:
-Tage seit letztem Training (inkl. heute): ${daysSinceLastTraining}
-Zusammenhängende Trainingstage bis gestern: ${consecutiveTrainingDays}
-Gestern geladene TSS (ctlLoad): ${yesterdayLoad.toFixed(1)}
-Vorgestern geladene TSS (ctlLoad): ${twoDaysAgoLoad.toFixed(1)}
-Letzte 2 Tage zusammen: ${last2DaysLoad.toFixed(1)} TSS
-Ruhe-/Belastungs-Empfehlung: ${
-      suggestRestDay
-        ? "Empfehlung: Heute eher Ruhetag oder nur sehr lockere, kurze Einheit."
-        : "Normale Belastung möglich – auf Körpergefühl achten."
-    }
-
-Rechenweg:
-targetFromWeek (vereinfachter Wochen-Schnitt) ≈ ${targetFromWeek.toFixed(1)} TSS
-baseFromFitness = dailyTargetBase(${dailyTargetBase}) * taperDailyFactor(${taperDailyFactor.toFixed(2)}) = ${baseFromFitness.toFixed(1)}
-combinedBase = 0.8 * ${targetFromWeek.toFixed(1)} + 0.2 * ${baseFromFitness.toFixed(1)} = ${combinedBase.toFixed(1)}
-tsbFactor = ${tsbFactor}
-microFactor = ${microFactor.toFixed(2)}
-dailyTargetRaw = combinedBase(${combinedBase.toFixed(1)}) * tsbFactor(${tsbFactor}) * microFactor(${microFactor.toFixed(2)}) = ${dailyTargetRaw.toFixed(1)}
-maxDaily = min(CTL*3=${(ctl * 3).toFixed(1)}, Week*2.5=${(avgTrainingDay * 2.5).toFixed(1)}) = ${maxDaily.toFixed(1)}
+Rechenweg (kompakt):
+targetFromWeek ≈ ${targetFromWeek.toFixed(1)} TSS
+baseFromFitness = ${baseFromFitness.toFixed(1)}
+combinedBase = ${combinedBase.toFixed(1)}
+tsbFactor = ${tsbFactor} | microFactor = ${microFactor.toFixed(2)}
+dailyTargetRaw = ${dailyTargetRaw.toFixed(1)} | maxDaily = ${maxDaily.toFixed(1)}
 
 Tagesziel: ${tssTarget} TSS
-Empfohlene Tagesrange: ${tssLow}–${tssHigh} TSS (80–120%)
-`;
+Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
+
 
     const payloadToday = {
       id: today,
