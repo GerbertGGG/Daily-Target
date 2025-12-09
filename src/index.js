@@ -106,7 +106,141 @@ function classifyWeek(ctl, atl, rampRate) {
 }
 
 // ---------------------------------------------------------
-// Hauptlogik
+// 6-Wochen-Simulation
+// ---------------------------------------------------------
+
+async function simulatePlannedWeeks(
+  ctlStart,
+  atlStart,
+  weekStateStart,
+  weeklyTargetStart,
+  mondayDate,
+  planSelected,
+  authHeader,
+  athleteId,
+  weeksToSim
+) {
+  const tauCtl = 42;
+  const tauAtl = 7;
+
+  // Trainingsmuster aus Plan (bool[7]) → Gewichte
+  let dayWeights = new Array(7).fill(0); // Mo..So
+  let countSelected = 0;
+  for (let i = 0; i < 7; i++) {
+    if (planSelected[i]) {
+      dayWeights[i] = 1;
+      countSelected++;
+    }
+  }
+  if (countSelected === 0) {
+    // Fallback, falls Plan leer → Mo,Mi,Fr,So
+    dayWeights = [1, 0, 1, 0, 1, 0, 1];
+    countSelected = 4;
+  }
+
+  let sumWeights = dayWeights.reduce((a, b) => a + b, 0);
+  if (sumWeights <= 0) {
+    dayWeights = [1, 0, 1, 0, 1, 0, 1];
+    sumWeights = 4;
+  }
+
+  let ctl = ctlStart;
+  let atl = atlStart;
+  let prevTarget = weeklyTargetStart;
+  let prevState = weekStateStart;
+
+  for (let w = 1; w <= weeksToSim; w++) {
+    const ctlAtWeekStart = ctl;
+
+    // 7 Tage simulieren
+    for (let d = 0; d < 7; d++) {
+      const share = dayWeights[d] / sumWeights;
+      const load = prevTarget * share; // TSS an diesem Tag
+
+      ctl = ctl + (load - ctl) / tauCtl;
+      atl = atl + (load - atl) / tauAtl;
+    }
+
+    const ctlEnd = ctl;
+    const atlEnd = atl;
+    const rampSim = ctlEnd - ctlAtWeekStart;
+
+    const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampSim);
+
+    // einfache Ramp-Logik für geplante Wochen:
+    let nextTarget = prevTarget;
+
+    if (simState === "Müde") {
+      nextTarget = prevTarget * 0.8; // Entlastungswoche
+    } else {
+      if (rampSim < 0.5) {
+        // CTL stagniert → etwas stärker steigern
+        nextTarget = prevTarget * (simState === "Erholt" ? 1.12 : 1.08);
+      } else if (rampSim < 1.0) {
+        nextTarget = prevTarget * (simState === "Erholt" ? 1.08 : 1.05);
+      } else if (rampSim <= 1.5) {
+        nextTarget = prevTarget * 1.02; // CTL steigt ohnehin ordentlich
+      } else {
+        // zu steile Ramp → leicht runter
+        nextTarget = prevTarget * 0.9;
+      }
+    }
+
+    // Caps: nicht komplett eskalieren oder abstürzen lassen
+    const minWeekly = prevTarget * 0.75;
+    const maxWeekly = prevTarget * 1.25;
+    nextTarget = Math.max(minWeekly, Math.min(maxWeekly, nextTarget));
+
+    // auf 5er runden
+    nextTarget = Math.round(nextTarget / 5) * 5;
+
+    const mondayFutureDate = new Date(mondayDate);
+    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7 * w);
+    const mondayId = mondayFutureDate.toISOString().slice(0, 10);
+
+    const emoji = stateEmoji(simState);
+    const planText = `Rest ${nextTarget} | ${emoji} ${simState} (geplant)`;
+
+    const payloadFuture = {
+      id: mondayId,
+      [WEEKLY_TARGET_FIELD]: nextTarget,
+      [INTERVALS_PLAN_FIELD]: planText
+    };
+
+    try {
+      const resFuture = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: authHeader
+          },
+          body: JSON.stringify(payloadFuture)
+        }
+      );
+      if (!resFuture.ok) {
+        const txt = await resFuture.text();
+        console.error(
+          "Failed to update future wellness:",
+          mondayId,
+          resFuture.status,
+          txt
+        );
+      } else if (resFuture.body) {
+        resFuture.body.cancel?.();
+      }
+    } catch (e) {
+      console.error("Error updating future week:", e);
+    }
+
+    prevTarget = nextTarget;
+    prevState = simState;
+  }
+}
+
+// ---------------------------------------------------------
+// Hauptlogik (Heute planen + Simulation)
 // ---------------------------------------------------------
 
 async function handle(env) {
@@ -540,6 +674,22 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
         { status: 500 }
       );
     } else if (updateRes.body) updateRes.body.cancel?.();
+
+    // -----------------------------------------------------
+    // 8) 6-Wochen-Simulation auf Basis HEUTE
+    // -----------------------------------------------------
+    const WEEKS_TO_SIM = 6;
+    await simulatePlannedWeeks(
+      ctlMon,            // CTL am Wochenanfang (Montag)
+      atlMon,            // ATL am Wochenanfang
+      weekState,         // aktueller Wochentyp
+      weeklyTarget,      // aktuelles Wochenziel
+      mondayDate,        // Date-Objekt des aktuellen Montags
+      planSelected,      // bool[7] für Mo..So
+      authHeader,
+      athleteId,
+      WEEKS_TO_SIM
+    );
 
     return new Response(
       `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, plannedDay=${isPlannedTrainingDay}`,
