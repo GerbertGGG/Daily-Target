@@ -6,7 +6,7 @@ const INTERVALS_ATHLETE_ID = "i105857";
 const INTERVALS_TARGET_FIELD = "TageszielTSS";
 const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
-const DAILY_TYPE_FIELD = "TagesTyp"; // hier trägst du am Sonntag die nächsten Trainingstage ein
+const DAILY_TYPE_FIELD = "TagesTyp"; // hier definierst du deine Wochentage
 
 // Fallback: angenommene Anzahl Trainingstage pro Woche (nur für Caps etc.)
 const TRAINING_DAYS_PER_WEEK = 4.0;
@@ -18,8 +18,9 @@ const TAPER_DAILY_START = 0.8;
 const TAPER_DAILY_END = 0.3;
 
 // KV-Keys
-const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";      // lernendes Muster (Idee 1)
-const WEEKPLAN_PREFIX = "weekPlan:";                // Wochenplan: weekPlan:YYYY-MM-DD
+const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";         // lernendes Muster (Idee 1)
+const WEEKPLAN_PREFIX = "weekPlan:";                   // Wochenplan: weekPlan:YYYY-MM-DD
+const WEEKPLAN_STRING_PREFIX = "weekPlanString:";      // Klartext-Plan: "Mo,Mi,Do,Sa"
 
 // Ab wann zählt ein Tag als „Trainingstag“ (TSS-Schwelle)
 const TRAIN_THRESHOLD = 5;
@@ -35,7 +36,7 @@ function dayIdxFromJsDay(jsDay) {
 
 const DAY_NAMES = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 
-// Trainingstage aus String wie "Mo,Mi,Sa" oder "2,4,6" parsen
+// Trainingstage aus String wie "Mo,Mi,Sa" oder "2,4,6" parsen → bool[7] (Mo..So)
 function parseTrainingDays(str) {
   if (!str || typeof str !== "string") return new Array(7).fill(false);
 
@@ -429,26 +430,100 @@ function computeTaperDays(ctl0, atl0, normalLoad, daysToEvent) {
 }
 
 // ---------------------------------------------------------
-// Wochenplan-Logik (User wählt am Sonntag Trainingstage)
+// Wochenplan-Logik + KV (Plan-String & Gewichte)
 // ---------------------------------------------------------
 
-async function storeWeekPlanFromSunday(env, todayDate, wellnessToday) {
+async function saveWeekPlan(env, mondayStr, weights, planString) {
+  if (!env || !env.KV || !env.KV.put) return;
+  const plan = {
+    weekStart: mondayStr,
+    weights
+  };
+  await env.KV.put(WEEKPLAN_PREFIX + mondayStr, JSON.stringify(plan));
+  await env.KV.put(WEEKPLAN_STRING_PREFIX + mondayStr, planString);
+}
+
+// Plan aus KV laden → { weights, planString } oder null
+async function loadWeekPlan(env, mondayStr) {
+  if (!env || !env.KV || !env.KV.get) return null;
+
+  let weights = null;
+  let planString = null;
+
+  const wpStr = await env.KV.get(WEEKPLAN_PREFIX + mondayStr);
+  if (wpStr) {
+    try {
+      const plan = JSON.parse(wpStr);
+      if (
+        plan &&
+        typeof plan.weekStart === "string" &&
+        Array.isArray(plan.weights) &&
+        plan.weights.length === 7
+      ) {
+        weights = plan.weights.map((v) =>
+          typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0
+        );
+      }
+    } catch (e) {
+      console.error("Error parsing week plan:", e);
+    }
+  }
+
+  const psStr = await env.KV.get(WEEKPLAN_STRING_PREFIX + mondayStr);
+  if (psStr && typeof psStr === "string") {
+    const trimmed = psStr.trim();
+    if (trimmed.length > 0) planString = trimmed;
+  }
+
+  // Falls nur planString existiert → Gewichte daraus generieren
+  if (!weights && planString) {
+    const selected = parseTrainingDays(planString);
+    const count = selected.filter(Boolean).length;
+    if (count > 0) {
+      const per = 1.0 / count;
+      weights = new Array(7).fill(0);
+      for (let i = 0; i < 7; i++) {
+        if (selected[i]) weights[i] = per;
+      }
+      await saveWeekPlan(env, mondayStr, weights, planString);
+    }
+  }
+
+  // Falls nur weights vorhanden → Plan-String aus Gewichten ableiten
+  if (weights && !planString) {
+    const names = [];
+    for (let i = 0; i < 7; i++) {
+      if ((weights[i] ?? 0) > 0) names.push(DAY_NAMES[i]);
+    }
+    planString = names.length > 0 ? names.join(",") : "Mo,Mi,Fr,So";
+    await saveWeekPlan(env, mondayStr, weights, planString);
+  }
+
+  if (!weights || !planString) return null;
+  return { weights, planString };
+}
+
+// Am Sonntag: dein `TagesTyp` ist der Plan für die NÄCHSTE Woche
+async function storeNextWeekPlanFromSunday(env, todayDate, wellnessToday) {
   if (!env || !env.KV || !env.KV.put) return null;
 
   const jsDay = todayDate.getUTCDay();
   if (jsDay !== 0) {
-    // Nur am Sonntag aktiv
+    // Nur am Sonntag
     return null;
   }
 
-  const planStr = wellnessToday[DAILY_TYPE_FIELD];
-  if (!planStr || typeof planStr !== "string") return null;
+  const raw = wellnessToday[DAILY_TYPE_FIELD];
+  if (!raw || typeof raw !== "string") return null;
 
-  const selected = parseTrainingDays(planStr);
+  const planString = raw.trim();
+  if (!planString) return null;
+
+  const selected = parseTrainingDays(planString);
   const count = selected.filter(Boolean).length;
   if (count === 0) return null;
 
-  // Montag der nächsten Woche
+  // Montag der nächsten Woche bestimmen
   const weekday = jsDay; // 0=So
   const offset = weekday === 0 ? 6 : weekday - 1;
   const mondayThisWeek = new Date(todayDate);
@@ -457,42 +532,143 @@ async function storeWeekPlanFromSunday(env, todayDate, wellnessToday) {
   nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
   const nextMondayStr = nextMonday.toISOString().slice(0, 10);
 
-  // einfache Gleichverteilung auf die gewählten Tage
   const weights = new Array(7).fill(0);
   const per = 1.0 / count;
   for (let i = 0; i < 7; i++) {
     if (selected[i]) weights[i] = per;
   }
 
-  const weekPlan = {
-    weekStart: nextMondayStr,
-    weights
-  };
+  await saveWeekPlan(env, nextMondayStr, weights, planString);
 
-  await env.KV.put(WEEKPLAN_PREFIX + nextMondayStr, JSON.stringify(weekPlan));
-
-  return weekPlan;
+  return { weekStart: nextMondayStr, weights, planString };
 }
 
-async function loadWeekPlanForWeek(env, mondayStr) {
-  if (!env || !env.KV || !env.KV.get) return null;
-  const key = WEEKPLAN_PREFIX + mondayStr;
-  const str = await env.KV.get(key);
-  if (!str) return null;
-  try {
-    const plan = JSON.parse(str);
-    if (
-      plan &&
-      typeof plan.weekStart === "string" &&
-      Array.isArray(plan.weights) &&
-      plan.weights.length === 7
-    ) {
-      return plan;
+// Plan-String in alle Tage der Woche schreiben, wo DAILY_TYPE_FIELD leer ist
+async function ensureDailyTypePlanForWeek(env, mondayStr, planString, todayDate) {
+  if (!env || !env.KV) return;
+
+  const mondayDate = new Date(mondayStr + "T00:00:00Z");
+  if (isNaN(mondayDate.getTime())) return;
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(mondayDate);
+    d.setUTCDate(d.getUTCDate() + i);
+    const id = d.toISOString().slice(0, 10);
+
+    // Wir schreiben **nicht** in Vergangenheits-Tage, die schon echte Daten haben,
+    // aber wir dürfen den Plan auch vorher sichtbar machen – also kein Limit hier.
+    // Wir überschreiben NIE, wenn das Feld schon nicht-leer ist.
+    try {
+      const res = await fetch(
+        `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
+        { headers: { Authorization: "Basic " + btoa(`API_KEY:${INTERVALS_API_KEY}`) } }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const raw = data[DAILY_TYPE_FIELD];
+      const existing =
+        raw == null
+          ? ""
+          : typeof raw === "string"
+          ? raw.trim()
+          : String(raw).trim();
+
+      if (!existing) {
+        // Feld ist leer → Plan-String reinschreiben
+        const payload = {
+          id,
+          [DAILY_TYPE_FIELD]: planString
+        };
+        const putRes = await fetch(
+          `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Basic " + btoa(`API_KEY:${INTERVALS_API_KEY}`)
+            },
+            body: JSON.stringify(payload)
+          }
+        );
+        if (!putRes.ok && putRes.body) {
+          putRes.body.cancel?.();
+        }
+      }
+    } catch (e) {
+      console.error("ensureDailyTypePlanForWeek error:", e);
     }
-  } catch (e) {
-    console.error("Error parsing week plan:", e);
   }
-  return null;
+}
+
+// Wenn du den Plan unter der Woche änderst → Restwoche anpassen
+async function propagatePlanStringForRestOfWeek(
+  env,
+  mondayStr,
+  oldPlanString,
+  newPlanString,
+  todayDate
+) {
+  if (!env) return;
+
+  const mondayDate = new Date(mondayStr + "T00:00:00Z");
+  if (isNaN(mondayDate.getTime())) return;
+
+  const todayTime = todayDate.getTime();
+  const oldTrim = (oldPlanString || "").trim();
+  const newTrim = (newPlanString || "").trim();
+
+  const authHeader = "Basic " + btoa(`API_KEY:${INTERVALS_API_KEY}`);
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(mondayDate);
+    d.setUTCDate(d.getUTCDate() + i);
+    const id = d.toISOString().slice(0, 10);
+
+    if (d.getTime() < todayTime) {
+      // Vergangene Tage nicht anrühren
+      continue;
+    }
+
+    try {
+      const res = await fetch(
+        `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
+        { headers: { Authorization: authHeader } }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const raw = data[DAILY_TYPE_FIELD];
+      const existing =
+        raw == null
+          ? ""
+          : typeof raw === "string"
+          ? raw.trim()
+          : String(raw).trim();
+
+      // Nur überschreiben, wenn es leer ist oder exakt der alte Plan drin stand
+      if (!existing || existing === oldTrim) {
+        const payload = {
+          id,
+          [DAILY_TYPE_FIELD]: newTrim
+        };
+        const putRes = await fetch(
+          `${BASE_URL}/athlete/${INTERVALS_ATHLETE_ID}/wellness/${id}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: authHeader
+            },
+            body: JSON.stringify(payload)
+          }
+        );
+        if (!putRes.ok && putRes.body) {
+          putRes.body.cancel?.();
+        }
+      }
+    } catch (e) {
+      console.error("propagatePlanStringForRestOfWeek error:", e);
+    }
+  }
 }
 
 // ---------------------------------------------------------
@@ -551,10 +727,18 @@ async function handle(env) {
       return new Response("No ctl/atl data", { status: 200 });
     }
 
-    // Am Sonntag: optional WeekPlan für nächste Woche aus DAILY_TYPE_FIELD schreiben
+    // Am Sonntag: dein `TagesTyp` als Plan für NÄCHSTE Woche speichern
     if (jsDay === 0) {
-      await storeWeekPlanFromSunday(env, todayDate, wellness);
+      await storeNextWeekPlanFromSunday(env, todayDate, wellness);
     }
+
+    const todaysDailyTypeRaw = wellness[DAILY_TYPE_FIELD];
+    const todaysDailyType =
+      todaysDailyTypeRaw == null
+        ? ""
+        : typeof todaysDailyTypeRaw === "string"
+        ? todaysDailyTypeRaw.trim()
+        : String(todaysDailyTypeRaw).trim();
 
     const { state: weekState, tsb } = classifyWeek(ctl, atl, rampRate);
     const dailyTargetBase = computeDailyTarget(ctl, atl);
@@ -779,25 +963,54 @@ async function handle(env) {
     stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
     const weekdayWeights = normalizePattern(stats);
 
-    // 7) Wochenplan für diese Woche:
-    const weekPlan = await loadWeekPlanForWeek(env, mondayStr);
+    // 7) Wochenplan laden (oder Default setzen)
+    let loadedPlan = await loadWeekPlan(env, mondayStr);
     let planWeights = null;
-    let plannedDaysText = "auto";
+    let planString = null;
+    let planIsDefault = false;
 
-    if (weekPlan && Array.isArray(weekPlan.weights) && weekPlan.weights.length === 7) {
-      planWeights = weekPlan.weights;
-      const plannedNames = [];
-      for (let i = 0; i < 7; i++) {
-        if (planWeights[i] > 0) plannedNames.push(DAY_NAMES[i]);
-      }
-      if (plannedNames.length > 0) {
-        plannedDaysText = plannedNames.join(",");
-      }
+    if (loadedPlan) {
+      planWeights = loadedPlan.weights;
+      planString = loadedPlan.planString;
     } else {
-      // ❗ Fallback, wenn du am Sonntag nichts gesetzt hast:
-      // Standard-Plan = Mo, Mi, Fr, So
+      // ❗ Kein Plan in KV → Default-Plan Mo,Mi,Fr,So
       planWeights = [0.25, 0.0, 0.25, 0.0, 0.25, 0.0, 0.25];
-      plannedDaysText = "Mo,Mi,Fr,So (Default)";
+      planString = "Mo,Mi,Fr,So";
+      planIsDefault = true;
+      await saveWeekPlan(env, mondayStr, planWeights, planString);
+    }
+
+    // Plan-String in die Woche hineinschreiben (nur leere Felder)
+    await ensureDailyTypePlanForWeek(env, mondayStr, planString, todayDate);
+
+    // 7b) Mid-Week-Override: Wenn du `TagesTyp` geändert hast → neuen Plan übernehmen
+    const oldPlanString = planString;
+    const todaysStr = todaysDailyType;
+
+    if (todaysStr && todaysStr !== oldPlanString) {
+      const selected = parseTrainingDays(todaysStr);
+      const count = selected.filter(Boolean).length;
+      if (count > 0) {
+        const per = 1.0 / count;
+        const newWeights = new Array(7).fill(0);
+        for (let i = 0; i < 7; i++) {
+          if (selected[i]) newWeights[i] = per;
+        }
+        // KV updaten
+        await saveWeekPlan(env, mondayStr, newWeights, todaysStr);
+        // Restwoche in den Feldern anpassen
+        await propagatePlanStringForRestOfWeek(
+          env,
+          mondayStr,
+          oldPlanString,
+          todaysStr,
+          todayDate
+        );
+        // und lokal für diesen Lauf verwenden
+        planWeights = newWeights;
+        planString = todaysStr;
+        planIsDefault = false;
+      }
     }
 
     // 8) Tagesziel – aus Wochenplan mit Umverteilung
@@ -807,9 +1020,8 @@ async function handle(env) {
 
     if (planWeights) {
       const weightToday = planWeights[dayIdx] ?? 0;
-      const sumWeights = planWeights.reduce((a, b) => a + b, 0);
 
-      if (sumWeights > 0 && weightToday > 0) {
+      if (weightToday > 0) {
         plannedTodayBase = weeklyTarget * weightToday;
 
         // geplante Restlast ab heute:
@@ -835,6 +1047,8 @@ async function handle(env) {
         // Heute kein geplanter Trainingstag laut Plan → sehr kleine Wochen-Komponente
         targetFromWeek = weeklyTarget * 0.02; // praktisch: fast Ruhetag
       }
+    } else {
+      targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
     }
 
     const baseFromFitness = dailyTargetBase * taperDailyFactor;
@@ -899,7 +1113,14 @@ async function handle(env) {
     const tssHigh = Math.round(tssTarget * 1.2);
 
     const emojiToday = stateEmoji(weekState);
-    const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
+    const plannedNames = [];
+    for (let i = 0; i < 7; i++) {
+      if ((planWeights?.[i] ?? 0) > 0) plannedNames.push(DAY_NAMES[i]);
+    }
+    let plannedDaysText = plannedNames.join(",");
+    if (planIsDefault) {
+      plannedDaysText += " (Default)";
+    }
 
     // Rechendetails fürs Muster
     const patternLine = weekdayWeights.map((v) => v.toFixed(2)).join(" ");
@@ -931,7 +1152,7 @@ Gestern ${yesterdayLoad.toFixed(1)} TSS, Vorgestern ${twoDaysAgoLoad.toFixed(1)}
 2-Tage-Load ${last2DaysLoad.toFixed(1)} TSS
 Empfehlung: ${suggestRestDay ? "eher Ruhetag/locker" : "normale Belastung ok"}
 
-Lernendes Muster (Idee 1, Auto-Modus):
+Lernendes Muster (Auto-Statistik):
 Gewichte Mo–So: ${patternLine}
 Anteil heute (Auto-Muster): ${shareTodayPct}% der Wochenlast
 Train-Wahrsch. heute ~ ${(pTrainToday * 100).toFixed(0)}%
@@ -950,9 +1171,8 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: tssTarget,
-      [INTERVALS_PLAN_FIELD]: planTextToday,
+      [INTERVALS_PLAN_FIELD]: planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`,
       comments: commentText
-      // DAILY_TYPE_FIELD bleibt unmodifiziert
     };
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
