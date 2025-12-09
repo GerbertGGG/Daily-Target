@@ -1135,7 +1135,7 @@ async function handle(env) {
     const avgIfTrainToday =
       trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
 
-    const commentText = `Tagesziel-Erklärung
+        const commentText = `Tagesziel-Erklärung
 
 Woche:
 Ziel ${weeklyTarget} TSS
@@ -1168,22 +1168,16 @@ dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 Tagesziel = ${tssTarget} TSS
 Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
 
-  const emojiToday = stateEmoji(weekState);
-const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
+    // 👉 Ab hier sauber, nur EIN emojiToday, EIN updateRes etc.
+    const emojiToday = stateEmoji(weekState);
+    const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
 
-const payloadToday = {
-  id: today,
-  [INTERVALS_TARGET_FIELD]: tssTarget,
-  [INTERVALS_PLAN_FIELD]: planTextToday,
-  comments: commentText
-};
-
-if (today === mondayStr && mondayWeeklyTarget == null) {
-  payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
-}
-
-
-
+    const payloadToday = {
+      id: today,
+      [INTERVALS_TARGET_FIELD]: tssTarget,
+      [INTERVALS_PLAN_FIELD]: planTextToday,
+      comments: commentText
+    };
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
       payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
@@ -1215,6 +1209,15 @@ if (today === mondayStr && mondayWeeklyTarget == null) {
       `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, suggestRestDay=${suggestRestDay}`,
       { status: 200 }
     );
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return new Response(
+      "Unexpected error: " + (err && err.stack ? err.stack : String(err)),
+      { status: 500 }
+    );
+  }
+}
+
   } catch (err) {
     console.error("Unexpected error:", err);
     return new Response(
