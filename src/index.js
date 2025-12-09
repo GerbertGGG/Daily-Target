@@ -638,37 +638,38 @@ const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
+// Kurzfassung fürs Muster im Kommentar
+const patternLine = weekdayWeights.map(v => v.toFixed(2)).join(" ");
+const shareTodayPct = (weekdayWeights[(weekday === 0 ? 6 : weekday - 1)] * 100).toFixed(1);
 
     const commentText = `Tagesziel-Erklärung
 
 Woche:
-Ziel: ${weeklyTarget} TSS
-Fortschritt: [${weekBar}] ${weekPercent}% (${weekLoad.toFixed(1)}/${weeklyTarget})
+Ziel ${weeklyTarget} TSS
+Fortschritt [${weekBar}] ${weekPercent}% (${weekLoad.toFixed(1)}/${weeklyTarget})
 
-Status heute:
+Status:
 CTL ${ctl.toFixed(1)} | ATL ${atl.toFixed(1)} | TSB ${tsb.toFixed(1)}
-Wochentyp: ${weekState} | Taper: ${inTaper ? "Ja" : "Nein"}
+Wochentyp ${weekState} | Taper ${inTaper ? "Ja" : "Nein"}
 
-Mikrozyklus:
-Tage seit letztem Training: ${daysSinceLastTraining}
-Serien bis gestern: ${consecutiveTrainingDays}
-Gestern: ${yesterdayLoad.toFixed(1)} TSS | Vorgestern: ${twoDaysAgoLoad.toFixed(1)} TSS
-Letzte 2 Tage: ${last2DaysLoad.toFixed(1)} TSS
-Empfehlung: ${
-  suggestRestDay
-    ? "Heute eher Ruhetag/locker."
-    : "Normale Belastung ok."
-}
+Mikro:
+Tage seit letztem Training ${daysSinceLastTraining}, Serie ${consecutiveTrainingDays}
+Gestern ${yesterdayLoad.toFixed(1)} TSS, Vorgestern ${twoDaysAgoLoad.toFixed(1)} TSS
+2-Tage-Load ${last2DaysLoad.toFixed(1)} TSS
+Empfehlung: ${suggestRestDay ? "eher Ruhetag/locker" : "normale Belastung ok"}
 
-Rechenweg (kompakt):
-targetFromWeek ≈ ${targetFromWeek.toFixed(1)} TSS
+Rechenweg:
+Muster Mo–So (normiert): ${patternLine}
+Anteil heute: ${shareTodayPct}% der Wochenlast
+=> targetFromWeek ≈ ${targetFromWeek.toFixed(1)} TSS
 baseFromFitness = ${baseFromFitness.toFixed(1)}
 combinedBase = ${combinedBase.toFixed(1)}
-tsbFactor = ${tsbFactor} | microFactor = ${microFactor.toFixed(2)}
-dailyTargetRaw = ${dailyTargetRaw.toFixed(1)} | maxDaily = ${maxDaily.toFixed(1)}
+tsbFactor = ${tsbFactor}, microFactor = ${microFactor.toFixed(2)}
+dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 
-Tagesziel: ${tssTarget} TSS
+Tagesziel = ${tssTarget} TSS
 Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
+
 
 
     const payloadToday = {
