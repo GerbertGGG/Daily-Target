@@ -1,9 +1,4 @@
 const BASE_URL = "https://intervals.icu/api/v1";
-// KV-Key für das Muster (neu, damit wir sauber starten)
-const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";
-
-// Ab wann zählt ein Tag als „Traininstag“ (TSS-Schwelle)
-const TRAIN_THRESHOLD = 5;
 
 // 🔥 Hardcoded Variablen – später ideal als Secrets/KV hinterlegen
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
@@ -13,7 +8,7 @@ const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp"; // bleibt ungenutzt, aber existiert
 
-// Fallback: angenommene Anzahl Trainingstage pro Woche
+// Fallback: angenommene Anzahl Trainingstage pro Woche (nur für Fallbacks)
 const TRAINING_DAYS_PER_WEEK = 4.0;
 
 // Taper-Konstanten (für Events)
@@ -22,17 +17,11 @@ const TAPER_MAX_DAYS = 21;
 const TAPER_DAILY_START = 0.8;
 const TAPER_DAILY_END = 0.3;
 
-// KV-Key für das Muster
-const WEEKDAY_PATTERN_KEY = "weekdayPatternRaw";
+// KV-Key für das Muster (Idee 1 Stats)
+const WEEKDAY_PATTERN_KEY = "weekdayStats_v1";
 
-// Lernrate für das exponentielle Lernen
-// 0.7 = reagiert recht schnell auf neue Gewohnheiten
-const PATTERN_ALPHA = 0.7;
-
-// ---------------------------------------------------------
-// Lernendes Wochentagsmuster (KV) – aktuell nur gepflegt,
-// noch nicht super aggressiv genutzt
-// ---------------------------------------------------------
+// Ab wann zählt ein Tag als „Trainingstag“ (TSS-Schwelle)
+const TRAIN_THRESHOLD = 5;
 
 // ---------------------------------------------------------
 // Lernendes Wochentagsmuster (Idee 1: P(Training) + Ø-Load)
@@ -44,10 +33,12 @@ const PATTERN_ALPHA = 0.7;
 function normalizePattern(stats) {
   // Backwards-Kompatibilität: falls noch ein altes Array drin liegt
   if (Array.isArray(stats)) {
-    const arr = stats.map((v) => (typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0));
+    const arr = stats.map((v) =>
+      typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0
+    );
     let sum = arr.reduce((a, b) => a + b, 0);
     if (sum <= 0) {
-      return [1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7];
+      return new Array(7).fill(1 / 7);
     }
     return arr.map((v) => v / sum);
   }
@@ -63,9 +54,9 @@ function normalizePattern(stats) {
     const sl = sumLoad[i] ?? 0;
     const w = weeks > 0 ? weeks : 1;
 
-    // P(Training an diesem Tag) ~ wie viele Wochen mit Training dort
+    // P(Training an diesem Tag) ~ Anteil der Wochen mit Training an diesem Tag
     let pTrain = tc / w;
-    if (pTrain > 1) pTrain = 1; // Safety
+    if (pTrain > 1) pTrain = 1;
 
     // Ø-Load, wenn trainiert wurde
     const avgIfTrain = tc > 0 ? sl / tc : 0;
@@ -76,7 +67,7 @@ function normalizePattern(stats) {
 
   let sumScores = scores.reduce((a, b) => a + b, 0);
   if (sumScores <= 0) {
-    return [1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7, 1 / 7];
+    return new Array(7).fill(1 / 7);
   }
 
   return scores.map((v) => v / sumScores);
@@ -117,11 +108,9 @@ async function initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDa
         const wd = dateObj.getUTCDay(); // 0=So,1=Mo...
         const idx = wd === 0 ? 6 : wd - 1; // Mo..So = 0..6
 
-        if (idx >= 0 && idx < 7) {
-          if (load >= TRAIN_THRESHOLD) {
-            trainCount[idx] += 1;
-            sumLoad[idx] += load;
-          }
+        if (idx >= 0 && idx < 7 && load >= TRAIN_THRESHOLD) {
+          trainCount[idx] += 1;
+          sumLoad[idx] += load;
         }
       }
     } else if (histRes.body) {
@@ -154,7 +143,6 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
 
   const rawStr = await env.KV.get(WEEKDAY_PATTERN_KEY);
   if (!rawStr) {
-    // erstmalig: aus History initialisieren
     return await initWeekdayPatternFromHistory(env, athleteId, authHeader, todayDate);
   }
 
@@ -175,7 +163,9 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
 
     // Alt: reines Array → vorsichtig in neue Stats überführen
     if (Array.isArray(parsed)) {
-      const arr = parsed.map((v) => (typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0));
+      const arr = parsed.map((v) =>
+        typeof v === "number" && isFinite(v) ? Math.max(0, v) : 0
+      );
       const trainCount = arr.map((v) => (v >= TRAIN_THRESHOLD ? 1 : 0));
       const sumLoad = arr.slice();
       const stats = {
@@ -200,7 +190,7 @@ async function loadRawPattern(env, athleteId, authHeader, todayDate) {
   return stats;
 }
 
-// Stats mit gestrigem Load updaten (einfaches Zählen)
+// Stats mit gestrigem Load updaten
 async function updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad) {
   if (!yesterdayDate || yesterdayLoad == null) {
     return stats;
@@ -236,7 +226,6 @@ async function updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLo
 
   return stats;
 }
-
 
 // ---------------------------------------------------------
 // Hilfsfunktionen Training / Müdigkeit / Taper
@@ -526,7 +515,7 @@ async function handle(env) {
       if (hitLastWeek && weekState !== "Müde") {
         let minAllowed = lastWeekTarget;
         if (tsb >= 0) {
-          const progFactor = (weekState === "Erholt") ? 1.10 : 1.05;
+          const progFactor = weekState === "Erholt" ? 1.10 : 1.05;
           const progressive = lastWeekTarget * progFactor;
           minAllowed = Math.max(minAllowed, progressive);
         }
@@ -654,48 +643,29 @@ async function handle(env) {
 
     const last2DaysLoad = yesterdayLoad + twoDaysAgoLoad;
 
+    // 6) Lernendes Wochentagsmuster (Idee 1)
     let stats = await loadRawPattern(env, athleteId, authHeader, todayDate);
-stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
-const weekdayWeights = normalizePattern(stats);
+    stats = await updatePatternWithYesterday(env, stats, yesterdayDate, yesterdayLoad);
+    const weekdayWeights = normalizePattern(stats);
 
-// ...
+    // 7) Tagesziel – musterbasierte Verteilung
+    let targetFromWeek;
+    {
+      const jsDay = weekday; // 0=So,1=Mo,...
+      const dayIdx = jsDay === 0 ? 6 : jsDay - 1; // Mo..So = 0..6
+      const weightToday = weekdayWeights[dayIdx] ?? 0;
+      const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
 
-// 7) Tagesziel – musterbasierte Verteilung
-let targetFromWeek;
-{
-  const jsDay = weekday;                      // 0 = So, 1 = Mo, ...
-  const dayIdx = jsDay === 0 ? 6 : jsDay - 1; // Mo..So = 0..6
-  const weightToday = weekdayWeights[dayIdx] ?? 0;
-  const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
+      if (sumWeights > 0 && weightToday > 0) {
+        targetFromWeek = weeklyTarget * weightToday;
+      } else {
+        targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
+      }
+    }
 
-  if (sumWeights > 0 && weightToday > 0) {
-    targetFromWeek = weeklyTarget * weightToday;
-  } else {
-    targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
-  }
-}
+    const baseFromFitness = dailyTargetBase * taperDailyFactor;
+    const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
 
-
-    // 7) 
-// 7) Tagesziel – jetzt mit lernender Wochenverteilung
-let targetFromWeek;
-{
-  const jsDay = weekday;              // 0 = So, 1 = Mo, ...
-  const dayIdx = jsDay === 0 ? 6 : jsDay - 1; // Mo..So = 0..6
-  const weightToday = weekdayWeights[dayIdx] ?? 0;
-  const sumWeights = weekdayWeights.reduce((a, b) => a + b, 0);
-
-  if (sumWeights > 0 && weightToday > 0) {
-    // Musterbasiert: Anteil dieser Wochentag-Last an der Wochenlast
-    targetFromWeek = weeklyTarget * weightToday;
-  } else {
-    // Fallback: „klassisch“ über angenommene Trainingstage
-    targetFromWeek = weeklyTarget / TRAINING_DAYS_PER_WEEK;
-  }
-}
-
-const baseFromFitness = dailyTargetBase * taperDailyFactor;
-const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
     let tsbFactor = 1.0;
     if (tsb >= 10) tsbFactor = 1.4;
     else if (tsb >= 5) tsbFactor = 1.25;
@@ -749,29 +719,28 @@ const combinedBase = 0.8 * targetFromWeek + 0.2 * baseFromFitness;
     );
 
     dailyTargetRaw = Math.max(0, dailyTargetRaw);
-    let dailyTarget = Math.round(Math.min(dailyTargetRaw, maxDaily));
+    const tssTarget = Math.round(Math.min(dailyTargetRaw, maxDaily));
 
-    const tssTarget = dailyTarget;
     const tssLow = Math.round(tssTarget * 0.8);
     const tssHigh = Math.round(tssTarget * 1.2);
 
     const emojiToday = stateEmoji(weekState);
     const planTextToday = `Rest ${weeklyRemaining} | ${emojiToday} ${weekState}`;
-// Kurzfassung fürs Muster im Kommentar
-const patternLine = weekdayWeights.map(v => v.toFixed(2)).join(" ");
-const shareTodayPct = (weekdayWeights[(weekday === 0 ? 6 : weekday - 1)] * 100).toFixed(1);
-const jsDay = weekday;
-const dayIdx = jsDay === 0 ? 6 : jsDay - 1;
 
-
-    
-
-// Stats für Heute (Idee 1)
-const trainCountToday = stats.trainCount?.[dayIdx] ?? 0;
-const weeksStats = stats.weeks ?? 1;
-const pTrainToday = Math.min(1, weeksStats > 0 ? trainCountToday / weeksStats : 0);
-const sumLoadTodayStat = stats.sumLoad?.[dayIdx] ?? 0;
-const avgIfTrainToday = trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
+    // Rechendetails fürs Muster
+    const jsDay2 = weekday;
+    const dayIdx2 = jsDay2 === 0 ? 6 : jsDay2 - 1;
+    const patternLine = weekdayWeights.map((v) => v.toFixed(2)).join(" ");
+    const shareTodayPct = (weekdayWeights[dayIdx2] * 100).toFixed(1);
+    const trainCountToday = stats.trainCount?.[dayIdx2] ?? 0;
+    const weeksStats = stats.weeks ?? 1;
+    const pTrainToday = Math.min(
+      1,
+      weeksStats > 0 ? trainCountToday / weeksStats : 0
+    );
+    const sumLoadTodayStat = stats.sumLoad?.[dayIdx2] ?? 0;
+    const avgIfTrainToday =
+      trainCountToday > 0 ? sumLoadTodayStat / trainCountToday : 0;
 
     const commentText = `Tagesziel-Erklärung
 
@@ -805,14 +774,12 @@ dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 Tagesziel = ${tssTarget} TSS
 Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
 
-
-
-
     const payloadToday = {
       id: today,
       [INTERVALS_TARGET_FIELD]: tssTarget,
       [INTERVALS_PLAN_FIELD]: planTextToday,
       comments: commentText
+      // DAILY_TYPE_FIELD bleibt ungenutzt
     };
 
     if (today === mondayStr && mondayWeeklyTarget == null) {
@@ -847,9 +814,10 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
     );
   } catch (err) {
     console.error("Unexpected error:", err);
-    return new Response("Unexpected error: " + (err && err.stack ? err.stack : String(err)), {
-      status: 500
-    });
+    return new Response(
+      "Unexpected error: " + (err && err.stack ? err.stack : String(err)),
+      { status: 500 }
+    );
   }
 }
 
