@@ -1,6 +1,6 @@
 const BASE_URL = "https://intervals.icu/api/v1";
 
-// 🔥 Hardcoded – besser später als Secrets hinterlegen
+// 🔥 Hardcoded – kannst du später nach env auslagern
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
@@ -121,7 +121,8 @@ async function simulatePlannedWeeks(
   planSelected,
   authHeader,
   athleteId,
-  weeksToSim
+  weeksToSim,
+  dryRun
 ) {
   const tauCtl = 42;
   const tauAtl = 7;
@@ -218,31 +219,33 @@ async function simulatePlannedWeeks(
       [INTERVALS_PLAN_FIELD]: planText
     };
 
-    try {
-      const resFuture = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payloadFuture)
-        }
-      );
-      if (!resFuture.ok) {
-        const txt = await resFuture.text();
-        console.error(
-          "Failed to update future wellness:",
-          mondayId,
-          resFuture.status,
-          txt
+    if (!dryRun) {
+      try {
+        const resFuture = await fetch(
+          `${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: authHeader
+            },
+            body: JSON.stringify(payloadFuture)
+          }
         );
-      } else if (resFuture.body) {
-        resFuture.body.cancel?.();
+        if (!resFuture.ok) {
+          const txt = await resFuture.text();
+          console.error(
+            "Failed to update future wellness:",
+            mondayId,
+            resFuture.status,
+            txt
+          );
+        } else if (resFuture.body) {
+          resFuture.body.cancel?.();
+        }
+      } catch (e) {
+        console.error("Error updating future week:", e);
       }
-    } catch (e) {
-      console.error("Error updating future week:", e);
     }
 
     prevTarget = nextTarget;
@@ -254,8 +257,11 @@ async function simulatePlannedWeeks(
 // Hauptlogik (Heute planen + Simulation)
 // ---------------------------------------------------------
 
-async function handle(env) {
+async function handle(env, request) {
   try {
+    const url = request ? new URL(request.url) : null;
+    const dryRun = url && url.searchParams.get("dryRun") === "1";
+
     const apiKey = INTERVALS_API_KEY;
     const athleteId = INTERVALS_ATHLETE_ID;
     if (!apiKey || !athleteId) {
@@ -359,18 +365,20 @@ async function handle(env) {
         id: mondayStr,
         [DAILY_TYPE_FIELD]: mondayPlanString
       };
-      const putMon = await fetch(
-        `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader
-          },
-          body: JSON.stringify(payloadMonUpdate)
-        }
-      );
-      if (!putMon.ok && putMon.body) putMon.body.cancel?.();
+      if (!dryRun) {
+        const putMon = await fetch(
+          `${BASE_URL}/athlete/${athleteId}/wellness/${mondayStr}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: authHeader
+            },
+            body: JSON.stringify(payloadMonUpdate)
+          }
+        );
+        if (!putMon.ok && putMon.body) putMon.body.cancel?.();
+      }
     }
 
     const planSelected = parseTrainingDays(mondayPlanString);
@@ -415,11 +423,11 @@ async function handle(env) {
     }
 
     // -----------------------------------------------------
-    // 4) Wochenziel berechnen
+    // 4) Wochenziel berechnen (mit Ramp-Cap & Low-CTL-Modus)
     // -----------------------------------------------------
     let weeklyTarget;
 
-    // Punkt 5: Niedrige CTL bekommen sanftere Basisfaktoren
+    // Niedrige CTL bekommen sanftere Basisfaktoren
     let baseFactor;
     if (ctlMon < 25) {
       // Einsteiger-Modus: etwas konservativer
@@ -454,7 +462,7 @@ async function handle(env) {
         weeklyTargetRaw = Math.max(weeklyTargetRaw, Math.round(minAllowed));
       }
 
-      // Punkt 1: Wochenziel zusätzlich durch Ramp-Cap begrenzen
+      // Ramp-Cap: Wochenziel zusätzlich gegenüber Vorwoche begrenzen
       if (lastWeekActual != null && lastWeekActual > 0) {
         let rampLimit;
         if (ctlMon < 30) rampLimit = 1.15;      // max +15 % bei sehr niedriger CTL
@@ -554,7 +562,7 @@ async function handle(env) {
     const todayLoad = ctlLoadByDate.get(today) ?? 0;
 
     // -----------------------------------------------------
-    // 6) Tagesziel – Wochenlogik + Mikro
+    // 6) Tagesziel – Wochenlogik + Mikro (mit clamp)
     // -----------------------------------------------------
     const trueRemaining = Math.max(0, weeklyTarget - weekLoadUntilYesterday);
 
@@ -629,7 +637,7 @@ async function handle(env) {
       microFactor *= 0.7;
     }
 
-    // Punkt 4: Mikro-Faktor clampen, damit es nicht komplett eskaliert
+    // Mikro-Faktor clampen, damit es nicht komplett eskaliert
     microFactor = Math.max(0.6, Math.min(1.4, microFactor));
 
     let dailyTargetRaw = combinedBase * tsbFactor * microFactor;
@@ -709,45 +717,89 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
       payloadToday[WEEKLY_TARGET_FIELD] = weeklyTarget;
     }
 
-    const updateRes = await fetch(
-      `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader
-        },
-        body: JSON.stringify(payloadToday)
-      }
-    );
-    if (!updateRes.ok) {
-      const text = await updateRes.text();
-      return new Response(
-        `Failed to update wellness: ${updateRes.status} ${text}`,
-        { status: 500 }
+    if (!dryRun) {
+      const updateRes = await fetch(
+        `${BASE_URL}/athlete/${athleteId}/wellness/${today}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: authHeader
+          },
+          body: JSON.stringify(payloadToday)
+        }
       );
-    } else if (updateRes.body) updateRes.body.cancel?.();
+      if (!updateRes.ok) {
+        const text = await updateRes.text();
+        return new Response(
+          `Failed to update wellness: ${updateRes.status} ${text}`,
+          { status: 500 }
+        );
+      } else if (updateRes.body) updateRes.body.cancel?.();
+    }
 
     // -----------------------------------------------------
-    // 8) 6-Wochen-Simulation auf Basis HEUTE
+    // 8) 6-Wochen-Simulation auf Basis HEUTE (nur wenn kein dryRun)
     // -----------------------------------------------------
     const WEEKS_TO_SIM = 6;
-    await simulatePlannedWeeks(
-      ctlMon,            // CTL am Wochenanfang (Montag)
-      atlMon,            // ATL am Wochenanfang
-      weekState,         // aktueller Wochentyp
-      weeklyTarget,      // aktuelles Wochenziel
-      mondayDate,        // Date-Objekt des aktuellen Montags
-      planSelected,      // bool[7] für Mo..So
-      authHeader,
-      athleteId,
-      WEEKS_TO_SIM
-    );
+    if (!dryRun) {
+      await simulatePlannedWeeks(
+        ctlMon,            // CTL am Wochenanfang (Montag)
+        atlMon,            // ATL am Wochenanfang
+        weekState,         // aktueller Wochentyp
+        weeklyTarget,      // aktuelles Wochenziel
+        mondayDate,        // Date-Objekt des aktuellen Montags
+        planSelected,      // bool[7] für Mo..So
+        authHeader,
+        athleteId,
+        WEEKS_TO_SIM,
+        dryRun
+      );
+    }
 
-    return new Response(
-      `OK: Tagesziel=${tssTarget}, Wochenziel=${weeklyTarget}, Range=${tssLow}-${tssHigh}, plannedDay=${isPlannedTrainingDay}`,
-      { status: 200 }
-    );
+    // -----------------------------------------------------
+    // 9) JSON-Ausgabe für Tests (inkl. Wochen-TSS-Infos)
+    // -----------------------------------------------------
+    const responseBody = {
+      dryRun,
+      date: today,
+      weeklyTarget,
+      weeklyRemaining,
+      weekDone,
+      weekPercent,
+      lastWeek: {
+        target: lastWeekTarget,
+        actual: lastWeekActual
+      },
+      ctlMon,
+      atlMon,
+      ctlToday: ctl,
+      atlToday: atl,
+      tsb,
+      weekState,
+      plan: {
+        mondayPlanString,
+        planSelected: DAY_NAMES.map((n, i) => ({ day: n, selected: !!planSelected[i] })),
+        isPlannedTrainingDay,
+        remainingPlannedDays
+      },
+      daily: {
+        tssTarget,
+        tssLow,
+        tssHigh,
+        baseFromFitness,
+        baseForToday,
+        tsbFactor,
+        microFactor,
+        combinedBase,
+        suggestRestDay
+      }
+    };
+
+    return new Response(JSON.stringify(responseBody, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
   } catch (err) {
     console.error("Unexpected error:", err);
     return new Response(
@@ -763,9 +815,10 @@ Range: ${tssLow}–${tssHigh} TSS (80–120%)`;
 
 export default {
   async fetch(request, env, ctx) {
-    return handle(env);
+    return handle(env, request);
   },
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handle(env));
+    // kein Request → dryRun = false
+    ctx.waitUntil(handle(env, null));
   }
 };
