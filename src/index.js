@@ -4,7 +4,7 @@ const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
-const INTERVALS_TARGET_FIELD = "TageszielTSS";  // numerisches Tagesziel
+const INTERVALS_TARGET_FIELD = "TageszielTSS";  // numerisches Tagesziel (heute möglich)
 const INTERVALS_PLAN_FIELD = "WochenPlan";      // kurzer Plantext
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";    // Wochenziel (TSS)
 const DAILY_TYPE_FIELD = "TagesTyp";            // z.B. "Mo,Mi,Fr,So"
@@ -542,8 +542,18 @@ async function handle(env) {
       targetFromWeek = 0; // kein Plan-Day → Plan drückt nicht
     }
 
+    // was wäre heute physiologisch möglich (ohne Plan)?
     const baseFromFitness = dailyTargetBase;
-    const combinedBase = 0.7 * targetFromWeek + 0.3 * baseFromFitness;
+
+    // Basis für das heutige Ziel:
+    // - Ruhetage im Plan: wir ignorieren den Plan → nur Fitness
+    // - Plantage: mindestens Plan, aber nicht unter Fitness
+    let baseForToday = baseFromFitness;
+    if (isPlannedTrainingDay && targetFromWeek > 0) {
+      baseForToday = Math.max(baseFromFitness, targetFromWeek);
+    }
+
+    const combinedBase = baseForToday;
 
     // TSB-Faktor
     let tsbFactor = 1.0;
@@ -633,9 +643,9 @@ verbleibende geplante Trainingstage (inkl. heute, falls geplant): ${remainingPla
 geplanter Anteil heute (Plan) = ${plannedShareToday.toFixed(1)} TSS
 targetFromWeek (Plan-Komponente heute) = ${targetFromWeek.toFixed(1)} TSS
 
-Rechenweg (Tagesziel):
-baseFromFitness = ${baseFromFitness.toFixed(1)}
-combinedBase = ${combinedBase.toFixed(1)}
+Rechenweg (Tagesziel = was heute möglich wäre):
+baseFromFitness (rein aus CTL/ATL) = ${baseFromFitness.toFixed(1)}
+Basis für heutiges Ziel (baseForToday) = ${baseForToday.toFixed(1)}
 tsbFactor = ${tsbFactor.toFixed(2)}, microFactor = ${microFactor.toFixed(2)}
 dailyTargetRaw = ${dailyTargetRaw.toFixed(1)}, maxDaily = ${maxDaily.toFixed(1)}
 
