@@ -79,7 +79,6 @@ function classifyWeek(ctl, atl, rampRate) {
 function computeMarkers(units, hrMax, ftp) {
   if (!Array.isArray(units)) units = [];
 
-  // GA1/GA2 Filter: min. 30min, Endurance, HF ≤85% HFmax, Watt ≤100% FTP
   const gaUnits = units.filter(u => {
     const durationOk = u.durationMinutes >= 30;
     const isEndurance = ["Endurance", "LongRide", "EasyRun"].includes(u.type);
@@ -94,7 +93,6 @@ function computeMarkers(units, hrMax, ftp) {
     decupling = sumDecu / gaUnits.length;
   }
 
-  // PDC = Peak Dauerleistung aus intensiven Einheiten
   const intenseUnits = units.filter(u => ["Interval", "Sprint", "VO2Max"].includes(u.type));
   let pdc = null;
   if (intenseUnits.length > 0) {
@@ -112,7 +110,7 @@ function recommendWeekPhase(lastWeekMarkers, weekState) {
   const decupling = lastWeekMarkers?.decupling ?? null;
   const pdc = lastWeekMarkers?.pdc ?? null;
 
-  let phase = "Aufbau"; // Default
+  let phase = "Aufbau";
   if (decupling === null || pdc === null) phase = "Grundlage";
   else if (decupling > 5) phase = "Grundlage";
   else if (pdc < 0.9) phase = "Intensiv";
@@ -165,7 +163,26 @@ async function simulatePlannedWeeks(
     const phase = recommendWeekPhase(lastWeekMarkers, simState);
 
     const emoji = stateEmoji(simState);
-    const nextTarget = Math.round(Math.max(prevTarget*0.75, Math.min(prevTarget*1.25, prevTarget * (simState==="Müde"?0.8:(rampSim<0.5?(simState==="Erholt"?1.12:1.08):rampSim<1.0?(simState==="Erholt"?1.08:1.05):rampSim<=1.5?1.02:0.9)))/5)*5;
+
+    // ------------------------------
+    // Fix: Multiplier aufsplitten statt verschachtelte ternäre
+    // ------------------------------
+    let multiplier = 1.0;
+    if (simState === "Müde") {
+      multiplier = 0.8;
+    } else if (rampSim < 0.5) {
+      multiplier = simState === "Erholt" ? 1.12 : 1.08;
+    } else if (rampSim < 1.0) {
+      multiplier = simState === "Erholt" ? 1.08 : 1.05;
+    } else if (rampSim <= 1.5) {
+      multiplier = 1.02;
+    } else {
+      multiplier = 0.9;
+    }
+
+    let nextTarget = prevTarget * multiplier;
+    nextTarget = Math.max(prevTarget * 0.75, Math.min(prevTarget * 1.25, nextTarget));
+    nextTarget = Math.round(nextTarget / 5) * 5;
 
     const mondayFutureDate = new Date(mondayDate);
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate()+7*w);
