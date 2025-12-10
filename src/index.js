@@ -1,6 +1,6 @@
 const BASE_URL = "https://intervals.icu/api/v1";
 
-// 🔥 Hardcoded – später besser als Secrets
+// 🔥 Hardcoded – besser später als Secret
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
@@ -60,32 +60,39 @@ function classifyWeek(ctl, atl, rampRate){
 }
 
 // ---------------------------------------------------------
-// Marker: Decoupling & PDC Lorang-style
+// Marker: Decoupling & PDC Lorang + Philipp-Seipp Style
 // ---------------------------------------------------------
 function computeMarkers(units){
-  if(!Array.isArray(units)) return {decoupling:null, pdc:null};
-  // GA1-only Decoupling (Herzfrequenz vs. Leistung)
-  const gaUnits = units.filter(u=>u.zone==="GA1" && u.duration>=20);
-  const decoupling = gaUnits.length>0?gaUnits.reduce((sum,u)=>sum+u.hrDecoupling,0)/gaUnits.length:null;
-  // PDC: Peak Dauerleistung vs. VO2max
-  const pdc = units.length>0?units.reduce((sum,u)=>sum+u.pdc,0)/units.length:null;
-  return {decoupling, pdc};
+  if(!Array.isArray(units)) return {decupling: null, pdc: null};
+
+  // Decoupling nur aus GA1-Einheiten >= 20min
+  const gaUnits = units.filter(u => u.zone === "GA1" && u.duration >= 20);
+  const decupling = gaUnits.length > 0 ? gaUnits.reduce((sum,u)=>sum + (u.hrDecoupling??0),0)/gaUnits.length : null;
+
+  // PDC: Peak Dauerleistung / VO2max, über alle Einheiten
+  const pdc = units.length > 0 ? units.reduce((sum,u)=>sum + (u.pdc??0),0)/units.length : null;
+
+  return {decupling, pdc};
 }
 
 // ---------------------------------------------------------
-// Empfehlung 
+// Wochenphase Empfehlung Lorang + Kommentar verständlich
+// ---------------------------------------------------------
 function recommendWeekPhase(lastWeekMarkers, simState){
-  const decupling = lastWeekMarkers?.decupling ?? 999; // große Zahl = sehr verschlissen
-  const pdc = lastWeekMarkers?.pdc ?? 0.0;             // niedrig = Intensiv nötig
+  // Default-Fallbacks, damit nie undefined
+  const decupling = lastWeekMarkers?.decupling ?? 999; 
+  const pdc = lastWeekMarkers?.pdc ?? 0.0;
 
   let phase = "Aufbau"; 
-  if(decupling > 5) phase = "Grundlage";        // zu verschlissen
-  else if(pdc < 0.9) phase = "Intensiv";       // PDC zu niedrig
+  if(decupling > 5) phase = "Grundlage";        // zu verschlissen → aerobische Basis
+  else if(pdc < 0.9) phase = "Intensiv";       // anaerobe Kapazität steigern
   else phase = "Aufbau";
 
-  if(simState === "Müde") phase = "Erholung";   // Deload
+  if(simState === "Müde") phase = "Erholung";   // Deload, Ramp zu hoch oder ATL kritisch
+
   return phase;
 }
+
 // ---------------------------------------------------------
 // 6-Wochen-Simulation inkl. Ramp & Marker
 // ---------------------------------------------------------
@@ -93,56 +100,57 @@ async function simulatePlannedWeeks(
   ctlStart, atlStart, weekStateStart, weeklyTargetStart,
   mondayDate, planSelected, authHeader, athleteId, units, weeksToSim
 ){
-  const tauCtl=42, tauAtl=7;
+  const tauCtl = 42, tauAtl = 7;
   let dayWeights = new Array(7).fill(0), countSelected=0;
   for(let i=0;i<7;i++) if(planSelected[i]){ dayWeights[i]=1; countSelected++; }
   if(countSelected===0){ dayWeights=[1,0,1,0,1,0,1]; countSelected=4; }
   const sumWeights = dayWeights.reduce((a,b)=>a+b,0);
 
-  let ctl=ctlStart, atl=atlStart, prevTarget=weeklyTargetStart, prevState=weekStateStart;
+  let ctl = ctlStart, atl = atlStart, prevTarget = weeklyTargetStart, prevState = weekStateStart;
   const weeklyProgression=[];
 
-  for(let w=1;w<=weeksToSim;w++){
-    const ctlWeekStart=ctl;
-    for(let d=0;d<7;d++){
+  for(let w=1; w<=weeksToSim; w++){
+    const ctlWeekStart = ctl;
+    for(let d=0; d<7; d++){
       const share = dayWeights[d]/sumWeights;
       const load = prevTarget*share;
-      ctl += (load-ctl)/tauCtl;
-      atl += (load-atl)/tauAtl;
+      ctl += (load - ctl)/tauCtl;
+      atl += (load - atl)/tauAtl;
     }
 
-    const ctlEnd=ctl, atlEnd=atl;
-    const rampSim = ctlEnd-ctlWeekStart;
+    const ctlEnd = ctl, atlEnd = atl;
+    const rampSim = ctlEnd - ctlWeekStart;
     const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampSim);
 
-    // Tages- und Wochen-TSS Anpassung
-    let multiplier=1.0;
-    if(simState==="Müde") multiplier=0.8;
-    else if(rampSim<0.5) multiplier=simState==="Erholt"?1.12:1.08;
-    else if(rampSim<1.0) multiplier=simState==="Erholt"?1.08:1.05;
-    else if(rampSim<=1.5) multiplier=1.02;
-    else multiplier=0.9;
+    // Anpassung der Wochen-TSS
+    let multiplier = 1.0;
+    if(simState==="Müde") multiplier = 0.8; 
+    else if(rampSim<0.5) multiplier = simState==="Erholt"?1.12:1.08;
+    else if(rampSim<1.0) multiplier = simState==="Erholt"?1.08:1.05;
+    else if(rampSim<=1.5) multiplier = 1.02;
+    else multiplier = 0.9;
 
     let nextTarget = prevTarget*multiplier;
-    nextTarget=Math.max(prevTarget*0.75, Math.min(prevTarget*1.25, nextTarget));
-    nextTarget=Math.round(nextTarget/5)*5;
+    nextTarget = Math.max(prevTarget*0.75, Math.min(prevTarget*1.25, nextTarget));
+    nextTarget = Math.round(nextTarget/5)*5;
 
-    const mondayFutureDate=new Date(mondayDate);
-    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate()+7*w);
-    const mondayId=mondayFutureDate.toISOString().slice(0,10);
+    const mondayFutureDate = new Date(mondayDate);
+    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7*w);
+    const mondayId = mondayFutureDate.toISOString().slice(0,10);
 
     // Marker & Phase
     const lastWeekMarkers = computeMarkers(units);
     const phase = recommendWeekPhase(lastWeekMarkers, simState);
 
+    // Philipp-Seipp Style Kommentar
     const emoji = stateEmoji(simState);
-    const planText = `Rest ${nextTarget} | ${emoji} ${simState} | Phase: ${phase}`;
+    const planText = `Rest ${nextTarget} | ${emoji} ${simState} | Phase: ${phase} | Decupling=${lastWeekMarkers.decupling?.toFixed(2)}, PDC=${lastWeekMarkers.pdc?.toFixed(2)}, Ramp=${rampSim.toFixed(2)}`;
 
-    const payloadFuture={
-      id:mondayId,
-      [WEEKLY_TARGET_FIELD]:nextTarget,
-      [INTERVALS_PLAN_FIELD]:planText,
-      comments:`Automatische Wochenphase: ${phase}, Decoupling=${lastWeekMarkers.decupling}, PDC=${lastWeekMarkers.pdc}`
+    const payloadFuture = {
+      id: mondayId,
+      [WEEKLY_TARGET_FIELD]: nextTarget,
+      [INTERVALS_PLAN_FIELD]: planText,
+      comments: `Automatische Wochenphase: ${phase}. Basierend auf Marker Decoupling=${lastWeekMarkers.decupling?.toFixed(2)}, PDC=${lastWeekMarkers.pdc?.toFixed(2)}, Ramp=${rampSim.toFixed(2)}. Deload falls Müde.`
     };
 
     try{
@@ -151,14 +159,20 @@ async function simulatePlannedWeeks(
         headers:{"Content-Type":"application/json", Authorization: authHeader},
         body:JSON.stringify(payloadFuture)
       });
-      if(!resFuture.ok){ const txt=await resFuture.text(); console.error("Failed to update future wellness:",mondayId,resFuture.status,txt); }
+      if(!resFuture.ok){ const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId, resFuture.status, txt); }
       else if(resFuture.body) resFuture.body.cancel?.();
     }catch(e){ console.error("Error updating future week:",e); }
 
-    prevTarget=nextTarget;
-    prevState=simState;
+    prevTarget = nextTarget;
+    prevState = simState;
 
-    weeklyProgression.push({weekOffset:w,monday:mondayId,weeklyTarget:nextTarget,state:simState,phase:phase});
+    weeklyProgression.push({
+      weekOffset:w,
+      monday:mondayId,
+      weeklyTarget:nextTarget,
+      state:simState,
+      phase:phase
+    });
   }
   return weeklyProgression;
 }
@@ -168,38 +182,38 @@ async function simulatePlannedWeeks(
 // ---------------------------------------------------------
 async function handle(env){
   try{
-    const apiKey=INTERVALS_API_KEY;
-    const athleteId=INTERVALS_ATHLETE_ID;
+    const apiKey = INTERVALS_API_KEY;
+    const athleteId = INTERVALS_ATHLETE_ID;
     if(!apiKey||!athleteId) return new Response("Missing config",{status:500});
-    const authHeader="Basic "+btoa(`API_KEY:${apiKey}`);
+    const authHeader = "Basic "+btoa(`API_KEY:${apiKey}`);
 
-    const now=new Date();
-    const today=now.toISOString().slice(0,10);
-    const todayDate=new Date(today+"T00:00:00Z");
-    const jsDay=todayDate.getUTCDay();
-    const dayIdx=dayIdxFromJsDay(jsDay);
+    const now = new Date();
+    const today = now.toISOString().slice(0,10);
+    const todayDate = new Date(today+"T00:00:00Z");
+    const jsDay = todayDate.getUTCDay();
+    const dayIdx = dayIdxFromJsDay(jsDay);
 
-    const offset=jsDay===0?6:jsDay-1;
-    const mondayDate=new Date(todayDate);
-    mondayDate.setUTCDate(mondayDate.getUTCDate()-offset);
-    const mondayStr=mondayDate.toISOString().slice(0,10);
+    const offset = jsDay===0?6:jsDay-1;
+    const mondayDate = new Date(todayDate);
+    mondayDate.setUTCDate(mondayDate.getUTCDate() - offset);
+    const mondayStr = mondayDate.toISOString().slice(0,10);
 
     // 1) Wellness heute
     const wellnessRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{headers:{Authorization:authHeader}});
     if(!wellnessRes.ok){ const text=await wellnessRes.text(); return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500}); }
     const wellness = await wellnessRes.json();
-    const ctl=wellness.ctl, atl=wellness.atl;
-    const rampRate=wellness.rampRate??0;
+    const ctl = wellness.ctl, atl = wellness.atl;
+    const rampRate = wellness.rampRate ?? 0;
     if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
     const { state: weekState, tsb } = classifyWeek(ctl, atl, rampRate);
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
     // 2) Montag / Plan
-    const planSelected=parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
+    const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING);
 
     // 3) 6 Wochen Simulation
-    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
-    const units = wellness.units??[]; // Trainings-Einheiten für Marker
+    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD] ?? Math.round(dailyTargetBase*7);
+    const units = wellness.units ?? []; // Trainings-Einheiten für Marker
     const weeklyProgression = await simulatePlannedWeeks(
       ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, units, 6
     );
