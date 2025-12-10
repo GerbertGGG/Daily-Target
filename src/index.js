@@ -10,6 +10,7 @@ const DEFAULT_PLAN_STRING = "Mo,Mi,Fr,So";
 const DAY_NAMES = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 
 function dayIdxFromJsDay(jsDay) { return jsDay === 0 ? 6 : jsDay - 1; }
+
 function parseTrainingDays(str) {
   if (!str || typeof str !== "string") return new Array(7).fill(false);
   const tokens = str.split(/[,\s;]+/).map(t => t.trim()).filter(t => t.length>0);
@@ -152,7 +153,6 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const lastWeekMarkers = historicalMarkers[w-1] || {decupling:3,pdc:0.95, prevDecupling:3, prevPDC:0.95};
     const phase = recommendWeekPhase(lastWeekMarkers, simState);
 
-    // Generiere Langzeit-Briefing
     const markers42d = historicalMarkers[Math.max(0,w-6)] || lastWeekMarkers;
     const markers90d = historicalMarkers[Math.max(0,w-13)] || lastWeekMarkers;
     const briefing = generateLongTermBriefing(mondayId, phase, simState, prevTarget, nextTarget, lastWeekMarkers, markers42d, markers90d, rampSim);
@@ -160,8 +160,8 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const payloadFuture = {
       id:mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
-      [INTERVALS_PLAN_FIELD]: briefing,
-      comments:`Automatisches Briefing generiert`
+      [INTERVALS_PLAN_FIELD]: `Rest ${nextTarget} | ${stateEmoji(simState)} ${simState} | Phase: ${phase}`,
+      comments: briefing
     };
 
     try{
@@ -205,7 +205,6 @@ async function handle(env){
     const dailyTargetBase = computeDailyTarget(ctl, atl);
     const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
     const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
-
     const historicalMarkers = wellness.historicalMarkers??[];
 
     const weeklyProgression = await simulatePlannedWeeks(ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers);
