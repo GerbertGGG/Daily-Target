@@ -73,20 +73,19 @@ function computeMarkers(units){
 }
 
 // ---------------------------------------------------------
-// Wochenphase Empfehlung Lorang
-// ---------------------------------------------------------
+// Empfehlung 
 function recommendWeekPhase(lastWeekMarkers, simState){
-  const { decoupling, pdc } = lastWeekMarkers||{};
-  let phase = "Aufbau"; 
-  if(!decupling||!pdc) phase="Grundlage";
-  else if(decupling>5) phase="Grundlage";
-  else if(pdc<0.9) phase="Intensiv";
-  else phase="Aufbau";
+  const decupling = lastWeekMarkers?.decupling ?? 999; // große Zahl = sehr verschlissen
+  const pdc = lastWeekMarkers?.pdc ?? 0.0;             // niedrig = Intensiv nötig
 
-  if(simState==="Müde") phase="Erholung";
+  let phase = "Aufbau"; 
+  if(decupling > 5) phase = "Grundlage";        // zu verschlissen
+  else if(pdc < 0.9) phase = "Intensiv";       // PDC zu niedrig
+  else phase = "Aufbau";
+
+  if(simState === "Müde") phase = "Erholung";   // Deload
   return phase;
 }
-
 // ---------------------------------------------------------
 // 6-Wochen-Simulation inkl. Ramp & Marker
 // ---------------------------------------------------------
