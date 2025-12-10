@@ -254,8 +254,12 @@ async function handle(env) {
     // 3) Alle Einheiten der Woche holen
     const sundayDate = new Date(mondayDate);
     sundayDate.setUTCDate(sundayDate.getUTCDate()+6);
-    const unitsRes = await fetch(`${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sundayDate.toISOString().slice(0,10)}`, { headers:{Authorization: authHeader}});
-    const units = await unitsRes.json();
+    // 3) Alle Einheiten der Woche holen
+const unitsRes = await fetch(`${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sundayDate.toISOString().slice(0,10)}`, { headers:{Authorization: authHeader}});
+const unitsJson = await unitsRes.json();
+
+// Prüfen, ob Array vorhanden
+const units = unitsJson.activities ?? unitsJson.data ?? [];
 
     // HRmax & FTP aus Wellness oder Athlete-Profil
     const hrMax = wellness.hrMax || 173;
