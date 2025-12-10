@@ -184,8 +184,13 @@ async function simulatePlannedWeeks(
       id: mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
       [INTERVALS_PLAN_FIELD]: planText,
-      comments: `Automatische Wochenphase: ${phase}, Decoupling=${lastWeekMarkers.decupling}, PDC=${lastWeekMarkers.pdc}`
-    };
+      comments: `Wochenphase automatisch berechnet:
+- Phase: ${phase} (${weekState} in dieser Woche)
+- Aerobe Belastung: Decoupling=${lastWeekMarkers.decupling?.toFixed(2)} 
+  (niedrig = gute aerobe Basis, hoch = evtl. Müdigkeit)
+- Anaerobe Belastung: PDC=${lastWeekMarkers.pdc?.toFixed(2)} 
+  (Peak Dauerleistung im Vergleich zu FTP)
+- Empfehlung: Trainingsintensität und Volumen anpassen basierend auf diesen Markern`
 
     try {
       const resFuture = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`, {
