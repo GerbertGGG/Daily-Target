@@ -106,19 +106,20 @@ function computeMarkers(units, hrMax, ftp) {
 
 // ---------------------------------------------------------
 // Wochenphase Empfehlung
-// ---------------------------------------------------------
+// -------------------------------------------------------
 function recommendWeekPhase(lastWeekMarkers, weekState) {
-  const { decoupling, pdc } = lastWeekMarkers || {};
-  let phase = "Aufbau";
-  if (!decupling || !pdc) phase = "Grundlage";
-  else if (decupling > 5) phase = "Grundlage";
-  else if (pdc < 0.9) phase = "Intensiv";
+  const decupling = lastWeekMarkers?.decupling ?? null;
+  const pdc = lastWeekMarkers?.pdc ?? null;
+
+  let phase = "Aufbau"; // Default
+  if (decupling === null || pdc === null) phase = "Grundlage";
+  else if (decupling > 5) phase = "Grundlage"; 
+  else if (pdc < 0.9) phase = "Intensiv";     
   else phase = "Aufbau";
 
   if (weekState === "Müde") phase = "Erholung";
   return phase;
 }
-
 // ---------------------------------------------------------
 // 6-Wochen-Simulation inkl. Wochenphase & Marker
 // ---------------------------------------------------------
