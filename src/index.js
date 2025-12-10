@@ -191,7 +191,7 @@ async function simulatePlannedWeeks(
 - Anaerobe Belastung: PDC=${lastWeekMarkers.pdc?.toFixed(2)} 
   (Peak Dauerleistung im Vergleich zu FTP)
 - Empfehlung: Trainingsintensität und Volumen anpassen basierend auf diesen Markern`
-
+}
     try {
       const resFuture = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`, {
         method:"PUT",
