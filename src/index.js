@@ -6,7 +6,7 @@ const ATHLETE_ID = "i105857";
 // Feldnamen genau wie in Intervals
 const WEEKLY_TARGET_FIELD = "WochenzielTSS"; // <- richtig
 const PLAN_FIELD = "WochenPlan";
-const COMMENT_FIELD = "comment";
+const COMMENT_FIELD = "comments";
 
 const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
