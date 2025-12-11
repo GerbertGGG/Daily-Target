@@ -411,8 +411,9 @@ async function handle(dryRun = true) {
         ? "medianDrift=null -> phase=Grundlage"
         : `medianDrift=${(medianDrift * 100).toFixed(2)}% · FatOx=${fatOx?.toFixed(2)} -> phase=${phase}`;
 
-    const thisWeekPlan = calcNextWeekTarget(ctl, atl);
-    const weeklyTargetTss = Math
+    // bereits oben berechnet – hier nicht erneut deklarieren
+const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
+
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
     const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
