@@ -2,7 +2,7 @@ const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
-const INTERVALS_TARGET_FIELD = "TageszielTSS"; // <-- added: Tagesziel
+const INTERVALS_TARGET_FIELD = "TageszielTSS";
 const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp";
@@ -82,46 +82,20 @@ function recommendWeekPhase(lastWeekMarkers, weekState){
   return phase;
 }
 
-// ------------------- Langzeit-Briefing -------------------
-function generateLongTermBriefing(mondayId, phase, simState, tssPrev, tssCurrent, lastWeekMarkers, markers42d, markers90d, rampSim){
-  const currentMarkers = lastWeekMarkers || {decupling:null,pdc:null, prevDecupling:null, prevPDC:null};
-  // safe values for percentage calcs
-  const safe42 = markers42d || {tss: tssPrev || tssCurrent || 0, decupling: currentMarkers.decupling||0, pdc: currentMarkers.pdc||0};
-  const safe90 = markers90d || {tss: tssPrev || tssCurrent || 0, decupling: currentMarkers.decupling||0, pdc: currentMarkers.pdc||0};
-  const pct42 = safe42.tss?(((tssCurrent - safe42.tss) / safe42.tss) * 100).toFixed(0):"0";
-  const pct90 = safe90.tss?(((tssCurrent - safe90.tss) / safe90.tss) * 100).toFixed(0):"0";
-
-  return `Woche: ${mondayId} | Phase: ${phase} | SimState: ${simState}\n`+
-`------------------------------------------------\n`+
-`Vergleich Vorwoche: \n`+
-`  TSS:        ${tssPrev} → ${tssCurrent}\n`+
-`  Decoupling: ${lastWeekMarkers?.prevDecupling?.toFixed(2)??"-"} → ${currentMarkers.decupling?.toFixed(2)??"-"}\n`+
-`  PDC:        ${lastWeekMarkers?.prevPDC?.toFixed(2)??"-"} → ${currentMarkers.pdc?.toFixed(2)??"-"}\n\n`+
-`Trend 42 Tage:\n`+
-`  TSS:        ${pct42}%\n`+
-`  Decoupling: ${(currentMarkers.decupling - (safe42.decupling||0)).toFixed(2)}\n`+
-`  PDC:        ${(currentMarkers.pdc - (safe42.pdc||0)).toFixed(2)}\n\n`+
-`Trend 90 Tage:\n`+
-`  TSS:        ${pct90}%\n`+
-`  Decoupling: ${(currentMarkers.decupling - (safe90.decupling||0)).toFixed(2)}\n`+
-`  PDC:        ${(currentMarkers.pdc - (safe90.pdc||0)).toFixed(2)}\n\n`+
-`------------------------------------------------\n`+
-`Beurteilung:\n`+
-`- Aerobe Basis: ${((currentMarkers.decupling||0) < (lastWeekMarkers?.prevDecupling||0))?"verbessert":"stabil"}\n`+
-`- Anaerobe Kapazität: ${((currentMarkers.pdc||0) > (lastWeekMarkers?.prevPDC||0))?"gesteigert":"stabil"}\n`+
-`- Müdigkeit: Ramp=${rampSim.toFixed(2)} → Belastung ${simState}\n`+
-`Empfehlung:\n`+
-`- Weiter ${phase}, GA1/GA2 für Stabilität, gezielte Intensivintervalle einbauen\n`;
+// ------------------- Wochen-TSS aus CTL-Ziel -------------------
+function computeWeeklyTssForCtlIncrease(ctlStart, atlStart, dayWeights, targetCtlIncrease, tauCtl, tauAtl){
+  const sumWeights = dayWeights.reduce((a,b)=>a+b,0);
+  if(sumWeights===0) return 0;
+  // vereinfachte Näherung: Last pro Tag = gewünschte CTL-Steigerung * tauCtl / Anzahl gewichteter Tage
+  const avgDailyLoad = targetCtlIncrease * tauCtl / sumWeights;
+  return Math.round(avgDailyLoad * sumWeights);
 }
 
 // ------------------- 6-Wochen Simulation -------------------
 async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, historicalMarkers, writeToIntervals = false){
   const tauCtl = 42, tauAtl = 7;
-  let dayWeights = new Array(7).fill(0);
-  let countSelected = 0;
-  for(let i=0;i<7;i++) if(planSelected[i]){dayWeights[i]=1; countSelected++;}
-  if(countSelected===0){dayWeights=[1,0,1,0,1,0,1]; countSelected=4;}
-  const sumWeights = dayWeights.reduce((a,b)=>a+b,0);
+  let dayWeights = planSelected.map(v=>v?1:0);
+  if(dayWeights.reduce((a,b)=>a+b,0)===0) dayWeights=[1,0,1,0,1,0,1];
 
   let ctl = ctlStart, atl = atlStart, prevTarget = weeklyTargetStart, prevState = weekStateStart;
   const weeklyProgression = [];
@@ -131,7 +105,7 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
 
     // Tägliche Simulation der Woche
     for(let d=0; d<7; d++){
-      const share = dayWeights[d]/sumWeights;
+      const share = dayWeights[d]/dayWeights.reduce((a,b)=>a+b,0);
       const load = prevTarget * share;
       ctl = ctl + (load - ctl)/tauCtl;
       atl = atl + (load - atl)/tauAtl;
@@ -141,28 +115,23 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const rampSim = ctlEnd - ctlAtWeekStart;
     const {state: simState} = classifyWeek(ctlEnd, atlEnd, rampSim);
 
-    // RampSim-Impact auf Wochenziel geglättet
-    let nextTarget = prevTarget;
-    if(simState==="Müde") nextTarget = prevTarget*0.9;
-    else if(rampSim < 0.5) nextTarget = prevTarget*1.03;
-    else if(rampSim < 1.0) nextTarget = prevTarget*1.05;
-    else if(rampSim < 1.5) nextTarget = prevTarget*1.08;
-    else nextTarget = prevTarget*1.10;
-
-    nextTarget = Math.max(prevTarget*0.75, Math.min(prevTarget*1.25, nextTarget));
-    nextTarget = Math.round(nextTarget/5)*5;
+    // Wochen-TSS dynamisch aus CTL-Ziel
+    const ctlTargetIncrease = (simState==="Müde") ? 0 : 1.0; // z.B. 1.0 pro Woche
+    let nextTarget;
+    if(ctlTargetIncrease===0){
+      nextTarget = Math.round(prevTarget * 0.9);
+    } else {
+      nextTarget = computeWeeklyTssForCtlIncrease(ctl, atl, dayWeights, ctlTargetIncrease, tauCtl, tauAtl);
+    }
 
     const mondayFutureDate = new Date(mondayDate);
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7*w);
     const mondayId = mondayFutureDate.toISOString().slice(0,10);
 
-    // Historische Marker
     const lastWeekMarkers = historicalMarkers[w-1] || {decupling:3,pdc:0.95, prevDecupling:3, prevPDC:0.95};
-
-    // --- DC/PDC realistisch schätzen (Trend + Ramp) ---
     const recentMarkers = historicalMarkers.slice(Math.max(0,w-4), w);
     let dcTrend = 0, pdcTrend = 0;
-    if(recentMarkers.length >= 2){
+    if(recentMarkers.length>=2){
       for(let i=1;i<recentMarkers.length;i++){
         dcTrend += (recentMarkers[i].decupling - recentMarkers[i-1].decupling)/recentMarkers.length;
         pdcTrend += (recentMarkers[i].pdc - recentMarkers[i-1].pdc)/recentMarkers.length;
@@ -170,11 +139,10 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     }
     const simDecoupling = lastWeekMarkers.decupling + dcTrend + 0.1*rampSim;
     const simPDC = lastWeekMarkers.pdc + pdcTrend + 0.01*rampSim;
-    const estimatedMarkers = { ...lastWeekMarkers, decupling: simDecoupling, pdc: simPDC };
+    const estimatedMarkers = {...lastWeekMarkers, decupling: simDecoupling, pdc: simPDC};
 
     const phase = recommendWeekPhase(estimatedMarkers, simState);
 
-    // Briefing minimalistisch
     const briefing = `Woche: ${mondayId} | Phase: ${phase} | Zustand: ${simState} | Wochenziel: ${nextTarget} TSS`;
 
     const payloadFuture = {
@@ -195,7 +163,7 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
         else if(resFuture.body) resFuture.body.cancel?.();
       }catch(e){console.error("Error updating future week:", e);} 
     } else {
-      console.log(`Simulation für ${mondayId} (nicht Montag) – kein Schreiben`);
+      console.log(`Simulation für ${mondayId} – kein Schreiben`);
     }
 
     prevTarget = nextTarget;
@@ -216,7 +184,7 @@ async function handle(env){
     const now = new Date();
     const today = now.toISOString().slice(0,10);
     const todayDate = new Date(today+"T00:00:00Z");
-    const jsDay = todayDate.getUTCDay(); // 0=So,1=Mo...
+    const jsDay = todayDate.getUTCDay();
     const offset = jsDay===0?6:jsDay-1;
     const mondayDate = new Date(todayDate);
     mondayDate.setUTCDate(mondayDate.getUTCDate()-offset);
@@ -228,19 +196,16 @@ async function handle(env){
     if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
 
     const {state: weekState, tsb} = classifyWeek(ctl, atl, rampRate);
-
     const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
     const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(computeDailyTarget(ctl, atl)*7);
     const historicalMarkers = wellness.historicalMarkers??[];
 
-    // --- Intelligente Wochenzielberechnung für Montag ---
     const mondayIsToday = jsDay === 1;
     let thisWeekTarget = weeklyTargetStart;
     let phaseNow = "Aufbau";
     let commentNow = "";
 
     if(mondayIsToday){
-      // Schätze DC/PDC-Trend
       const recentMarkers = historicalMarkers.slice(-4);
       let dcTrend=0, pdcTrend=0;
       for(let i=1;i<recentMarkers.length;i++){
@@ -251,22 +216,18 @@ async function handle(env){
       const simPDC = (historicalMarkers[historicalMarkers.length-1]?.pdc ?? 0.95) + pdcTrend + 0.01*rampRate;
       const estimatedMarkers = { ...historicalMarkers[historicalMarkers.length-1], decupling: simDecoupling, pdc: simPDC };
 
-      // Ramp + Trend Faktoren
-      let rampFactor=1.0;
-      if(tsb>=5 && weekState==="Erholt") rampFactor=1.12;
-      else if(tsb>0 && weekState==="Normal") rampFactor=1.07;
-      else if(tsb<-5 || weekState==="Müde") rampFactor=0.92;
-
-      const trendFactor = 1 + Math.min(0.05, dcTrend); 
-      thisWeekTarget = Math.round(weeklyTargetStart * rampFactor * trendFactor / 5) * 5;
-      thisWeekTarget = Math.max(weeklyTargetStart*0.85, Math.min(weeklyTargetStart*1.15, thisWeekTarget));
+      const dayWeights = planSelected.map(v=>v?1:0);
+      if(weekState==="Müde"){
+        thisWeekTarget = Math.round(weeklyTargetStart*0.9);
+      } else {
+        thisWeekTarget = computeWeeklyTssForCtlIncrease(ctl, atl, dayWeights, 1.0, 42, 7);
+      }
 
       phaseNow = recommendWeekPhase(estimatedMarkers, weekState);
 
       commentNow = `Woche ${today} | Phase: ${phaseNow} | Zustand: ${weekState} | Wochenziel: ${thisWeekTarget} TSS
 TSB=${tsb.toFixed(1)}, RampSim=${rampRate.toFixed(2)}, DC/PDC-Trend=${dcTrend.toFixed(2)}/${pdcTrend.toFixed(2)}`;
       
-      // Update in Intervals.icu
       const payloadToday = {
         id: today,
         [WEEKLY_TARGET_FIELD]: thisWeekTarget,
@@ -283,7 +244,6 @@ TSB=${tsb.toFixed(1)}, RampSim=${rampRate.toFixed(2)}, DC/PDC-Trend=${dcTrend.to
       }catch(e){console.error("Error updating Monday:", e);}
     }
 
-    // --- 6-Wochen Prognose täglich ---
     const weeklyProgression = await simulatePlannedWeeks(
       ctl, atl, weekState, thisWeekTarget, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers, true
     );
@@ -296,12 +256,6 @@ TSB=${tsb.toFixed(1)}, RampSim=${rampRate.toFixed(2)}, DC/PDC-Trend=${dcTrend.to
 
   }catch(err){console.error("Unexpected error:",err); return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});}
 }
-
-
-
-
-
-
 
 // ------------------- EXPORT -------------------
 export default { async fetch(request, env, ctx){return handle(env);}, async scheduled(event, env, ctx){ctx.waitUntil(handle(env));} };
