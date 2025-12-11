@@ -31,9 +31,9 @@ function parseTrainingDays(str){
 function stateEmoji(state){if(state==="Erholt")return "🔥"; if(state==="Müde")return "🧘"; return "⚖️";}
 
 // ------------------- CTL/ATL & Wochenziel -------------------
-function computeWeeklyTarget(ctl, deltaCtlPerWeek=1){
-    const tauCtl = 42; // Zeitkonstante CTL
-    const weeklyTSS = (ctl + deltaCtlPerWeek * (tauCtl/7)) * 7;
+function weeklyTSSForCtl(ctl, deltaCtlPerWeek=1){
+    const tauCtl = 42; // exponentielle Zeitkonstante
+    const weeklyTSS = (ctl + deltaCtlPerWeek * tauCtl / 7) * 7;
     return Math.round(weeklyTSS);
 }
 
@@ -55,15 +55,6 @@ function classifyWeek(ctl, atl, rampRate){
     return {state:"Normal", tsb};
 }
 
-function computeMarkers(units){
-    if(!Array.isArray(units)) return {decupling:null,pdc:null};
-    const gaUnits = units.filter(u=>u.type===undefined?false:(u.type==="GA1"||u.type==="GA2"));
-    if(gaUnits.length===0) return {decupling:null,pdc:null};
-    const decupling = gaUnits.reduce((sum,u)=>sum+(u.hrDecoupling??0),0)/gaUnits.length;
-    const pdc = gaUnits.reduce((sum,u)=>sum+(u.pdc??0),0)/gaUnits.length;
-    return {decupling,pdc};
-}
-
 function recommendWeekPhase(lastWeekMarkers, weekState){
     const decupling = lastWeekMarkers?.decupling ?? null;
     const pdc = lastWeekMarkers?.pdc ?? null;
@@ -77,36 +68,13 @@ function recommendWeekPhase(lastWeekMarkers, weekState){
 }
 
 function generateLongTermBriefing(mondayId, phase, simState, tssPrev, tssCurrent, lastWeekMarkers, markers42d, markers90d, rampSim){
-    const currentMarkers = lastWeekMarkers || {decupling:null,pdc:null, prevDecupling:null, prevPDC:null};
-    const safe42 = markers42d || {tss: tssPrev || tssCurrent || 0, decupling: currentMarkers.decupling||0, pdc: currentMarkers.pdc||0};
-    const safe90 = markers90d || {tss: tssPrev || tssCurrent || 0, decupling: currentMarkers.decupling||0, pdc: currentMarkers.pdc||0};
-    const pct42 = safe42.tss?(((tssCurrent - safe42.tss)/safe42.tss)*100).toFixed(0):"0";
-    const pct90 = safe90.tss?(((tssCurrent - safe90.tss)/safe90.tss)*100).toFixed(0):"0";
-
     return `Woche: ${mondayId} | Phase: ${phase} | SimState: ${simState}\n`+
-`------------------------------------------------\n`+
-`Vergleich Vorwoche: \n`+
-`  TSS:        ${tssPrev} → ${tssCurrent}\n`+
-`  Decoupling: ${lastWeekMarkers?.prevDecupling?.toFixed(2)??"-"} → ${currentMarkers.decupling?.toFixed(2)??"-"}\n`+
-`  PDC:        ${lastWeekMarkers?.prevPDC?.toFixed(2)??"-"} → ${currentMarkers.pdc?.toFixed(2)??"-"}\n\n`+
-`Trend 42 Tage:\n`+
-`  TSS:        ${pct42}%\n`+
-`  Decoupling: ${(currentMarkers.decupling - (safe42.decupling||0)).toFixed(2)}\n`+
-`  PDC:        ${(currentMarkers.pdc - (safe42.pdc||0)).toFixed(2)}\n\n`+
-`Trend 90 Tage:\n`+
-`  TSS:        ${pct90}%\n`+
-`  Decoupling: ${(currentMarkers.decupling - (safe90.decupling||0)).toFixed(2)}\n`+
-`  PDC:        ${(currentMarkers.pdc - (safe90.pdc||0)).toFixed(2)}\n\n`+
-`------------------------------------------------\n`+
-`Beurteilung:\n`+
-`- Aerobe Basis: ${((currentMarkers.decupling||0) < (lastWeekMarkers?.prevDecupling||0))?"verbessert":"stabil"}\n`+
-`- Anaerobe Kapazität: ${((currentMarkers.pdc||0) > (lastWeekMarkers?.prevPDC||0))?"gesteigert":"stabil"}\n`+
-`- Müdigkeit: Ramp=${rampSim.toFixed(2)} → Belastung ${simState}\n`+
-`Empfehlung:\n`+
-`- Weiter ${phase}, GA1/GA2 für Stabilität, gezielte Intensivintervalle einbauen\n`;
+`- Vorwoche TSS: ${tssPrev} → ${tssCurrent}\n`+
+`- Ramp: ${rampSim.toFixed(2)} | Zustand: ${simState}\n`+
+`- Empfehlung: Weiter ${phase}, Belastung anpassen falls Müde\n`;
 }
 
-// ------------------- Simulation -------------------
+// ------------------- Wochen-Simulation -------------------
 async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, historicalMarkers){
     const tauCtl = 42, tauAtl = 7;
     const dayWeights = planSelected.map(v=>v?1:0);
@@ -116,60 +84,65 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const weeklyProgression = [];
 
     for(let w=1; w<=weeksToSim; w++){
-        const ctlAtWeekStart = ctl;
-
-        for(let d=0; d<7; d++){
-            const load = dayWeights[d]?prevTarget:0;
-            ctl = ctl + (load - ctl)/tauCtl;
-            atl = atl + (load - atl)/tauAtl;
-        }
-
-        const ctlEnd = ctl, atlEnd = atl;
-        const rampSim = ctlEnd - ctlAtWeekStart;
-        const {state: simState} = classifyWeek(ctlEnd, atlEnd, rampSim);
-
-        let nextTarget = prevTarget;
-        if(simState==="Müde") nextTarget = prevTarget*0.8;
-        else {
-            if(rampSim<0.5) nextTarget = prevTarget*(simState==="Erholt"?1.12:1.08);
-            else if(rampSim<1.0) nextTarget = prevTarget*(simState==="Erholt"?1.08:1.05);
-            else if(rampSim<=1.5) nextTarget = prevTarget*1.02;
-            else nextTarget = prevTarget*0.9;
-        }
-        nextTarget = Math.max(prevTarget*0.75, Math.min(prevTarget*1.25,nextTarget));
-        nextTarget = Math.round(nextTarget/5)*5;
-
         const mondayFutureDate = new Date(mondayDate);
         mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7*w);
         const mondayId = mondayFutureDate.toISOString().slice(0,10);
 
+        // 1️⃣ Berechne TSS für CTL-Steigerung +1
+        let plannedWeeklyTSS = weeklyTSSForCtl(ctl, 1);
+        const ctlAtWeekStart = ctl;
+
+        // 2️⃣ Verteilen auf Trainingstage
+        for(let d=0; d<7; d++){
+            const load = dayWeights[d] ? plannedWeeklyTSS : 0;
+            ctl = ctl + (load - ctl)/tauCtl;
+            atl = atl + (load - atl)/tauAtl;
+        }
+
+        // 3️⃣ Ramp und TSB prüfen
+        const ctlEnd = ctl, atlEnd = atl;
+        const ramp = ctlEnd - ctlAtWeekStart;
+        const tsb = ctlEnd - atlEnd;
+
+        let simState = "Normal";
+        if(tsb <= -15) simState = "Müde";  // Entlastung nötig
+        else if(ramp >= 1.5) simState = "Erholt";
+
+        // 4️⃣ Entlastungswoche bei Müde
+        if(simState==="Müde"){
+            plannedWeeklyTSS = Math.round(plannedWeeklyTSS * 0.7);
+            ctl = ctlAtWeekStart + (plannedWeeklyTSS - ctlAtWeekStart)/tauCtl*7;
+            atl = atl + (plannedWeeklyTSS - atl)/tauAtl*7;
+        }
+
+        // 5️⃣ Wochenphase
         const lastWeekMarkers = historicalMarkers[w-1] || {decupling:3,pdc:0.95, prevDecupling:3, prevPDC:0.95};
         const phase = recommendWeekPhase(lastWeekMarkers, simState);
 
         const markers42d = historicalMarkers[Math.max(0,w-6)] || lastWeekMarkers;
         const markers90d = historicalMarkers[Math.max(0,w-13)] || lastWeekMarkers;
-        const briefing = generateLongTermBriefing(mondayId, phase, simState, prevTarget, nextTarget, lastWeekMarkers, markers42d, markers90d, rampSim);
+        const briefing = generateLongTermBriefing(mondayId, phase, simState, prevTarget, plannedWeeklyTSS, lastWeekMarkers, markers42d, markers90d, ramp);
 
+        // 6️⃣ Hochladen / Speichern
         const payloadFuture = {
-            id:mondayId,
-            [WEEKLY_TARGET_FIELD]: nextTarget,
+            id: mondayId,
+            [WEEKLY_TARGET_FIELD]: plannedWeeklyTSS,
             [INTERVALS_PLAN_FIELD]: `Phase: ${phase} | ${stateEmoji(simState)} ${simState}`,
             comments: briefing
         };
-
         try{
             const resFuture = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,{
                 method:"PUT",
                 headers:{"Content-Type":"application/json", Authorization:authHeader},
                 body:JSON.stringify(payloadFuture)
             });
-            if(!resFuture.ok){ const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId,resFuture.status,txt); }
+            if(!resFuture.ok){ const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId,resFuture.status,txt);}
             else if(resFuture.body) resFuture.body.cancel?.();
-        }catch(e){ console.error("Error updating future week:", e);}
+        }catch(e){console.error("Error updating future week:", e);}
 
-        prevTarget = nextTarget;
+        prevTarget = plannedWeeklyTSS;
         prevState = simState;
-        weeklyProgression.push({weekOffset:w, monday:mondayId, weeklyTarget:nextTarget, state:simState, phase:phase});
+        weeklyProgression.push({weekOffset:w, monday:mondayId, weeklyTarget:plannedWeeklyTSS, state:simState, phase:phase});
     }
 
     return weeklyProgression;
@@ -199,7 +172,7 @@ async function handle(env){
         const weekState = classifyWeek(ctl, atl, wellness.rampRate??0).state;
 
         const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
-        const weeklyTargetStart = computeWeeklyTarget(ctl, 1);
+        const weeklyTargetStart = weeklyTSSForCtl(ctl, 1);
         const historicalMarkers = wellness.historicalMarkers??[];
 
         const weeklyProgression = await simulatePlannedWeeks(
