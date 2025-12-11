@@ -1,3 +1,12 @@
+function computeDailyTarget(ctl, atl){
+  const tsb = ctl - atl;
+  const tsbClamped = Math.max(-20, Math.min(20, tsb));
+  const base = 1.0; 
+  const k = 0.05;
+  const daily = ctl * (base + k*tsbClamped);
+  return Math.round(Math.max(0, Math.min(daily, ctl*1.5)));
+}
+
 const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
