@@ -43,27 +43,23 @@ function classifyWeek(ctl, atl, rampRate){
 }
 
 function recommendWeekPhase(lastWeekMarkers, weekState){
-  const decupling = lastWeekMarkers?.decupling ?? null;
-  const pdc = lastWeekMarkers?.pdc ?? null;
   let phase = "Aufbau";
-  if(!decupling||!pdc) phase="Grundlage";
-  else if(decupling>5) phase="Grundlage";
-  else if(pdc<0.9) phase="Intensiv";
-  else phase="Aufbau";
   if(weekState==="Müde") phase="Erholung";
+  else phase="Grundlage";
   return phase;
 }
 
-// ------------------- Berechnung Wochen-TSS -------------------
-function computeWeeklyTssFromCtl(prevTss, ctl, ctlIncrease){
-  // prevTss = bisherige Wochen-TSS
-  // ctlIncrease = gewünschter CTL-Zuwachs pro Woche (0,8–1,3)
-  const factor = 1 + ctlIncrease / ctl; // prozentualer Zuwachs basierend auf CTL
-  return Math.round(prevTss * factor);
+// ------------------- Berechnung Wochen-TSS nach CTL-Ziel -------------------
+function computeWeeklyTSSFromCTL(ctlPrev, ctlTargetIncrease, tauCtl=42, dayWeights=[1,0,1,0,1,0,1]){
+  const activeDays = dayWeights.reduce((a,b)=>a+b,0);
+  if(activeDays===0) return 150; // Fallback
+  // Berechne wöchentliche TSS, um ctlTargetIncrease zu erreichen
+  const weeklyTSS = (ctlPrev + ctlTargetIncrease * tauCtl) * activeDays / 7;
+  return Math.round(weeklyTSS);
 }
 
 // ------------------- 6-Wochen Simulation -------------------
-async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, historicalMarkers, writeToIntervals = false){
+async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, writeToIntervals = false){
   let dayWeights = planSelected.map(v=>v?1:0);
   if(dayWeights.reduce((a,b)=>a+b,0)===0) dayWeights=[1,0,1,0,1,0,1];
 
@@ -87,13 +83,14 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const {state: simState} = classifyWeek(ctlEnd, atlEnd, rampSim);
 
     // CTL-Zuwachs pro Woche
-    let ctlIncrease = 1.0; // Standard
-    if(simState==="Erholt") ctlIncrease = 1.2;
-    if(simState==="Müde") ctlIncrease = 0;
+    let ctlTargetIncrease = 1.0; // Standard
+    if(simState==="Erholt") ctlTargetIncrease = 1.2;
+    if(simState==="Normal") ctlTargetIncrease = 0.8;
+    if(simState==="Müde") ctlTargetIncrease = 0;
 
     let nextTarget;
-    if(ctlIncrease===0) nextTarget = Math.round(prevTarget*0.9);
-    else nextTarget = computeWeeklyTssFromCtl(prevTarget, ctl, ctlIncrease);
+    if(ctlTargetIncrease===0) nextTarget = Math.round(prevTarget*0.9);
+    else nextTarget = computeWeeklyTSSFromCTL(ctl, ctlTargetIncrease, tauCtl, dayWeights);
 
     const mondayFutureDate = new Date(mondayDate);
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7*w);
@@ -158,12 +155,13 @@ async function handle(env){
     let commentNow = "";
 
     if(mondayIsToday){
-      let ctlIncrease = 1.0;
-      if(weekState==="Erholt") ctlIncrease = 1.2;
-      if(weekState==="Müde") ctlIncrease = 0;
+      let ctlTargetIncrease = 1.0;
+      if(weekState==="Erholt") ctlTargetIncrease = 1.2;
+      else if(weekState==="Normal") ctlTargetIncrease = 0.8;
+      else if(weekState==="Müde") ctlTargetIncrease = 0;
 
-      if(ctlIncrease===0) thisWeekTarget = Math.round(weeklyTargetStart*0.9);
-      else thisWeekTarget = computeWeeklyTssFromCtl(weeklyTargetStart, ctl, ctlIncrease);
+      if(ctlTargetIncrease===0) thisWeekTarget = Math.round(weeklyTargetStart*0.9);
+      else thisWeekTarget = computeWeeklyTSSFromCTL(ctl, ctlTargetIncrease, 42, planSelected.map(v=>v?1:0));
 
       phaseNow = recommendWeekPhase({}, weekState);
 
@@ -187,7 +185,7 @@ TSB=${tsb.toFixed(1)}, RampSim=${rampRate.toFixed(2)}`;
     }
 
     const weeklyProgression = await simulatePlannedWeeks(
-      ctl, atl, weekState, thisWeekTarget, mondayDate, planSelected, authHeader, athleteId, 6, wellness.historicalMarkers??[], true
+      ctl, atl, weekState, thisWeekTarget, mondayDate, planSelected, authHeader, athleteId, 6, true
     );
 
     return new Response(JSON.stringify({
