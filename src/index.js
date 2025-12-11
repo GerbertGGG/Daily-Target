@@ -2,8 +2,8 @@
 // CONFIG
 //----------------------------------------------------------
 const BASE_URL = "https://intervals.icu/api/v1";
-const API_KEY = "API_KEY";     // später Secret
-const API_SECRET = "1xg1v04ym957jsqva8720oo01";  // später Secret
+const API_KEY = "API_KEY";           // später Secret in CF-Env
+const API_SECRET = "YOUR_API_KEY";   // später Secret in CF-Env
 const ATHLETE_ID = "i105857";
 
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
@@ -11,6 +11,19 @@ const PLAN_FIELD = "WochenPlan";
 const DAILY_TYPE_FIELD = "TagesTyp";
 
 const DEFAULT_PLAN_STRING = "Mo,Mi,Fr,So";
+
+// PMC-Konstanten
+const TAU_CTL = 42;
+const TAU_ATL = 7;
+
+// CTL-Target pro Woche
+const MIN_DELTA_CTL = 0.8;
+const MAX_DELTA_CTL = 1.3;
+const TARGET_DELTA_CTL = 1.0;
+
+// ACWR-Bereich "ok"
+const ACWR_MIN = 0.8;
+const ACWR_MAX = 1.3;
 
 //----------------------------------------------------------
 // TRAINING DAY PARSER
@@ -28,11 +41,14 @@ function parseTrainingDays(str) {
 
   for (let t of tokens) {
     t = t.trim().toLowerCase();
-    const num = parseInt(t);
+    if (!t) continue;
+
+    const num = parseInt(t, 10);
     if (!isNaN(num) && num >= 1 && num <= 7) {
       out[num - 1] = true;
       continue;
     }
+
     const key = t.slice(0, 2);
     if (map[key] !== undefined) out[map[key]] = true;
   }
@@ -56,7 +72,9 @@ function classifyWeek(ctl, atl, ramp) {
     ctl < 50 ? -5 :
     ctl < 80 ? -10 : -15;
 
-  const highATL = atl / ctl >= (ctl < 50 ? 1.2 : ctl < 80 ? 1.3 : 1.4);
+  const highATL = ctl > 0
+    ? (atl / ctl) >= (ctl < 50 ? 1.2 : ctl < 80 ? 1.3 : 1.4)
+    : false;
 
   if (ramp <= -0.5 && tsb >= -5) return { state: "Erholt", tsb };
   if (ramp >= 1.0 || tsb <= tsbCritical || highATL) return { state: "Müde", tsb };
@@ -64,15 +82,8 @@ function classifyWeek(ctl, atl, ramp) {
   return { state: "Normal", tsb };
 }
 
-function computeDailyTarget(ctl, atl) {
-  const tsb = ctl - atl;
-  const adj = Math.max(-20, Math.min(20, tsb));
-  const val = ctl * (1 + 0.05 * adj);
-  return Math.round(Math.max(0, Math.min(val, ctl * 1.5)));
-}
-
 //----------------------------------------------------------
-// Extract actual Intervals.icu fields
+// METRIC EXTRACTION
 //----------------------------------------------------------
 function extractMetrics(u) {
   const durationSec =
@@ -116,7 +127,7 @@ function computeMarkers(units, hrMax, ftp, ctl, atl) {
   const cleaned = units.map(extractMetrics);
   const filtered = cleaned.filter(u => u.sport !== "WeightTraining");
 
-  // ACWR (hier als ctl/avgTSS Näherung)
+  // ACWR
   const acwr = ctl > 0 ? atl / ctl : null;
 
   // Polarisation
@@ -124,11 +135,11 @@ function computeMarkers(units, hrMax, ftp, ctl, atl) {
 
   for (const u of filtered) {
     if (!u.hrAvg) continue;
-
     const dur = u.durationMin;
     if (dur <= 0) continue;
 
-    const rel = u.hrAvg / hrMax;
+    const rel = hrMax ? (u.hrAvg / hrMax) : null;
+    if (!rel) continue;
 
     total += dur;
     if (rel <= 0.80) z1z2 += dur;
@@ -139,16 +150,16 @@ function computeMarkers(units, hrMax, ftp, ctl, atl) {
 
   // Quality sessions
   const qualitySessions = filtered.filter(u => {
-    if (u.hrAvg && u.hrAvg / hrMax >= 0.90) return true;
+    if (u.hrAvg && hrMax && (u.hrAvg / hrMax) >= 0.90) return true;
     if (u.powerMax && ftp && u.powerMax >= ftp * 1.15) return true;
     return false;
   }).length;
 
-  // Decoupling (GA)
+  // Decoupling
   const ga = filtered.filter(u => {
     if (u.durationMin < 30) return false;
     if (!u.hrAvg) return false;
-    if (u.hrAvg > 0.85 * hrMax) return false;
+    if (hrMax && u.hrAvg > 0.85 * hrMax) return false;
     if (u.powerAvg && ftp && u.powerAvg > ftp * 0.90) return false;
     return true;
   });
@@ -208,57 +219,101 @@ function computeScores(m) {
 }
 
 //----------------------------------------------------------
-// PHASE SELECTOR
+// HELFER: Wochen-Load simulieren
 //----------------------------------------------------------
-function recommendPhase(scores, fatigue) {
-  if (fatigue === "Müde") return "Erholung";
-
-  const reds = Object.values(scores).filter(s => s.includes("🔴")).length;
-  if (reds >= 2) return "Grundlage (Reset)";
-  if (scores.aerobic.includes("🔴") || scores.polarisation.includes("🔴"))
-    return "Grundlage";
-  if (scores.anaerobic.includes("🟡") || scores.anaerobic.includes("🔴"))
-    return "Intensiv";
-
-  return "Aufbau";
+function buildDayWeights(plan) {
+  let dayWeights = plan.map(x => (x ? 1 : 0));
+  let sumW = dayWeights.reduce((a, b) => a + b, 0);
+  if (sumW === 0) {
+    dayWeights = [1, 0, 1, 0, 1, 0, 0]; // fallback: 3 Tage
+    sumW = 3;
+  }
+  return dayWeights.map(x => x / sumW);
 }
 
-//----------------------------------------------------------
-// Hilfsfunktion: eine Woche CTL/ATL mit gegebener Weekly-TSS simulieren
-//----------------------------------------------------------
-function simulateWeekLoads(ctlStart, atlStart, weeklyTss, dayWeights, tauCtl, tauAtl) {
+function simulateWeekLoads(ctlStart, atlStart, weeklyTss, dayWeights) {
   let ctl = ctlStart;
   let atl = atlStart;
 
-  const sumW = dayWeights.reduce((a, b) => a + b, 0) || 1;
-
   for (let d = 0; d < 7; d++) {
-    const load = weeklyTss * (dayWeights[d] / sumW);
-    ctl = ctl + (load - ctl) / tauCtl;
-    atl = atl + (load - atl) / tauAtl;
+    const load = weeklyTss * dayWeights[d];
+    ctl = ctl + (load - ctl) / TAU_CTL;
+    atl = atl + (load - atl) / TAU_ATL;
   }
+
   return { ctl, atl };
 }
 
 //----------------------------------------------------------
-// SIMULATION (6 Wochen) mit CTL-Regler 0.8–1.3 / Woche
+// HELFER: Weekly TSS so finden, dass ΔCTL in [0.8,1.3] liegt
 //----------------------------------------------------------
-async function simulate(
-  ctlStart, atlStart, fatigueStart, weeklyTargetStart,
-  mondayDate, plan, authHeader, athleteId,
-  units28, hrMax, ftp,
-  last4WeekAvgTss,
+function findWeeklyTssForCtlDelta(
+  ctlStart,
+  atlStart,
+  baseWeeklyTss,
+  dayWeights,
+  minDelta = MIN_DELTA_CTL,
+  maxDelta = MAX_DELTA_CTL,
+  targetDelta = TARGET_DELTA_CTL
+) {
+  let base = Math.max(20, baseWeeklyTss || 80); // Minimalbasis
+
+  let low = base * 0.3;
+  let high = base * 1.7;
+
+  let best = {
+    weeklyTss: base,
+    ctl: ctlStart,
+    atl: atlStart,
+    delta: 0
+  };
+
+  for (let i = 0; i < 20; i++) {
+    const mid = (low + high) / 2;
+    const { ctl, atl } = simulateWeekLoads(ctlStart, atlStart, mid, dayWeights);
+    const delta = ctl - ctlStart;
+
+    // Bester Wert so nah wie möglich an targetDelta, aber positiv
+    if (delta > 0 && Math.abs(delta - targetDelta) < Math.abs(best.delta - targetDelta)) {
+      best = { weeklyTss: mid, ctl, atl, delta };
+    }
+
+    if (delta < minDelta) {
+      low = mid; // zu wenig Wachstum → mehr TSS
+    } else if (delta > maxDelta) {
+      high = mid; // zu viel Wachstum → weniger TSS
+    } else {
+      // liegt im Zielband → hier können wir abbrechen
+      best = { weeklyTss: mid, ctl, atl, delta };
+      break;
+    }
+  }
+
+  // etwas runden
+  best.weeklyTss = Math.round(best.weeklyTss / 5) * 5;
+  return best;
+}
+
+//----------------------------------------------------------
+// CTL-FORECAST: Wochen iterativ simulieren
+//----------------------------------------------------------
+function simulateCtlForecast(
+  ctlStart,
+  atlStart,
+  weeklyTssStart,
+  mondayDate,
+  plan,
+  units28,
+  hrMax,
+  ftp,
   weeks = 6
 ) {
-  const tauCtl = 42, tauAtl = 7;
-
-  let dayWeights = plan.map(x => x ? 1 : 0);
-  let sumW = dayWeights.reduce((a, b) => a + b, 0);
-  if (sumW === 0) { dayWeights = [1, 0, 1, 0, 1, 0, 1]; sumW = 4; }
+  const dayWeights = buildDayWeights(plan);
 
   let ctl = ctlStart;
   let atl = atlStart;
-  let prev = weeklyTargetStart;
+  let weeklyTss = weeklyTssStart;
+  let acwrOk = true;
 
   const progression = [];
 
@@ -266,113 +321,62 @@ async function simulate(
     const ctlBefore = ctl;
     const atlBefore = atl;
 
-    // 1) erste Schätzung des Weekly-TSS (leicht Richtung Historie / ACWR)
-    let base = prev;
+    let weekResult;
 
-    // sanfte Annäherung an 4-Wochen-Schnitt
-    if (last4WeekAvgTss && last4WeekAvgTss > 0) {
-      base = (base * 0.4) + (last4WeekAvgTss * 0.6);
+    if (acwrOk) {
+      // Versuche ΔCTL in [0.8,1.3] zu halten
+      weekResult = findWeeklyTssForCtlDelta(
+        ctlBefore,
+        atlBefore,
+        weeklyTss,
+        dayWeights
+      );
+    } else {
+      // ACWR schon "nicht ok": halte TSS konstant (oder leicht reduziert)
+      const reducedTss = weeklyTss * 0.95;
+      const sim = simulateWeekLoads(ctlBefore, atlBefore, reducedTss, dayWeights);
+      weekResult = {
+        weeklyTss: Math.round(reducedTss / 5) * 5,
+        ctl: sim.ctl,
+        atl: sim.atl,
+        delta: sim.ctl - ctlBefore
+      };
     }
 
-    // leichte Steigerung, wenn nicht müde
-    let fatigueGuess = w === 1 ? fatigueStart : "Normal";
-    let rampFactor =
-      fatigueGuess === "Müde" ? 0.95 :
-      fatigueGuess === "Erholt" ? 1.05 :
-      1.02;
-
-    let weeklyTss = base * rampFactor;
-
-    // 2) CTL-Regler: Ziel-Delta zwischen 0.8 und 1.3
-    const TARGET_DELTA_CTL = 1.0;
-    const MIN_DELTA_CTL = 0.8;
-    const MAX_DELTA_CTL = 1.3;
-
-    // 2–3 Iterationen, um Weekly-TSS so zu treffen,
-    // dass DeltaCTL in [0.8, 1.3] landet
-    for (let iter = 0; iter < 3; iter++) {
-      const tmp = simulateWeekLoads(ctlBefore, atlBefore, weeklyTss, dayWeights, tauCtl, tauAtl);
-      const deltaCtl = tmp.ctl - ctlBefore;
-
-      if (deltaCtl >= MIN_DELTA_CTL && deltaCtl <= MAX_DELTA_CTL) {
-        // passt, übernehmen
-        ctl = tmp.ctl;
-        atl = tmp.atl;
-        break;
-      }
-
-      // Schutz gegen verrückte Werte
-      if (!isFinite(deltaCtl) || Math.abs(deltaCtl) < 0.1) {
-        // Falls Simulation degeneriert, Weekly-TSS minimal erhöhen
-        weeklyTss *= 1.1;
-        continue;
-      }
-
-      // gewünschte Ziel-Delta (auf Band geclipped)
-      let targetDelta =
-        deltaCtl < MIN_DELTA_CTL ? MIN_DELTA_CTL :
-        deltaCtl > MAX_DELTA_CTL ? MAX_DELTA_CTL :
-        TARGET_DELTA_CTL;
-
-      const factor = targetDelta / deltaCtl;
-
-      // Faktor begrenzen, damit es nicht explodiert
-      const safeFactor = Math.max(0.5, Math.min(1.5, factor));
-      weeklyTss = weeklyTss * safeFactor;
-
-      // in letzter Iteration CTL/ATL fest übernehmen
-      if (iter === 2) {
-        const finalTmp = simulateWeekLoads(ctlBefore, atlBefore, weeklyTss, dayWeights, tauCtl, tauAtl);
-        ctl = finalTmp.ctl;
-        atl = finalTmp.atl;
-      }
-    }
+    ctl = weekResult.ctl;
+    atl = weekResult.atl;
+    weeklyTss = weekResult.weeklyTss;
 
     const ramp = ctl - ctlBefore;
-    const fatigue = classifyWeek(ctl, atl, ramp).state;
+    const acwr = ctl > 0 ? atl / ctl : null;
 
+    // ACWR-Check: solange ok, lassen wir weiter wachsen
+    if (acwr != null && (acwr < ACWR_MIN || acwr > ACWR_MAX)) {
+      acwrOk = false;
+    }
+
+    const fatigue = classifyWeek(ctl, atl, ramp);
     const markers = computeMarkers(units28, hrMax, ftp, ctl, atl);
+    markers.acwr = acwr;
+
     const scores = computeScores(markers);
-    const phase = recommendPhase(scores, fatigue);
+    const phase = fatigue.state === "Müde"
+      ? "Erholung"
+      : "Aufbau";
 
-    const emoji = stateEmoji(fatigue);
-
-    // Montag der zukünftigen Woche
     const future = new Date(mondayDate);
     future.setUTCDate(future.getUTCDate() + 7 * w);
-    const id = future.toISOString().slice(0, 10);
-
-    const payload = {
-      id,
-      [WEEKLY_TARGET_FIELD]: Math.round(weeklyTss / 5) * 5, // auf 5 TSS runden
-      [PLAN_FIELD]: `Rest ${Math.round(weeklyTss)} | ${emoji} ${fatigue} | Phase: ${phase}`
-    };
-
-    // ins Wellnessfeld schreiben (non-dry-run; hier ggf. später umschalten)
-    try {
-      await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader
-        },
-        body: JSON.stringify(payload)
-      });
-    } catch (e) {
-      console.error(e);
-    }
+    const mondayStr = future.toISOString().slice(0, 10);
 
     progression.push({
       weekOffset: w,
-      monday: id,
-      weeklyTarget: Math.round(weeklyTss / 5) * 5,
-      weekState: fatigue,
+      monday: mondayStr,
+      weeklyTarget: weeklyTss,
+      weekState: fatigue.state,
       phase,
       markers,
       scores
     });
-
-    prev = weeklyTss;
   }
 
   return progression;
@@ -388,107 +392,108 @@ async function handle() {
     const today = new Date().toISOString().slice(0, 10);
     const todayObj = new Date(today + "T00:00:00Z");
 
-    const offset = (todayObj.getUTCDay() + 6) % 7;
+    const offset = (todayObj.getUTCDay() + 6) % 7; // Montag=0
     const monday = new Date(todayObj);
     monday.setUTCDate(monday.getUTCDate() - offset);
     const mondayStr = monday.toISOString().slice(0, 10);
 
-    // Wellness holen
+    // Wellness (aktueller CTL/ATL etc.)
     const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${today}`, {
       headers: { Authorization: authHeader }
     });
     const well = await wRes.json();
 
-    const ctl = well.ctl;
-    const atl = well.atl;
+    const ctl = well.ctl ?? 0;
+    const atl = well.atl ?? 0;
     const ramp = well.rampRate ?? 0;
-
-    const { state } = classifyWeek(ctl, atl, ramp);
-    const daily = computeDailyTarget(ctl, atl);
-
-    const plan = parseTrainingDays(well[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING);
 
     const hrMax = well.hrMax ?? 173;
     const ftp = well.ftp ?? 250;
 
-    // aktueller Wochen-TSS-Start
-    const startTarget = well[WEEKLY_TARGET_FIELD] ?? Math.round(daily * 7);
+    const weekState = classifyWeek(ctl, atl, ramp).state;
 
-    // Aktivitäten der letzten 4 Wochen holen, um avgTSS zu berechnen
+    // Trainingsplan-Pattern
+    const plan = parseTrainingDays(well[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING);
+
+    // Aktivitäten der letzten 28 Tage + diese Woche für Marker / TSS
     const start28 = new Date(monday);
     start28.setUTCDate(start28.getUTCDate() - 28);
-    const startStr = start28.toISOString().slice(0, 10);
-    const endStr = new Date(monday.getTime() + 6 * 86400000)
-      .toISOString()
-      .slice(0, 10);
+    const start28Str = start28.toISOString().slice(0, 10);
+
+    const endThisWeek = new Date(monday);
+    endThisWeek.setUTCDate(endThisWeek.getUTCDate() + 6);
+    const endStr = endThisWeek.toISOString().slice(0, 10);
 
     const actRes = await fetch(
-      `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${startStr}&newest=${endStr}`,
+      `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start28Str}&newest=${endStr}`,
       { headers: { Authorization: authHeader } }
     );
-    const act = await actRes.json();
-    const units28 = act ?? [];
+    const activities = await actRes.json() ?? [];
 
-    // TSS pro Woche aus den letzten 4 Wochen
-    const tssByWeek = {};
-    for (const u of units28) {
-      if (!u.start_date) continue;
-      const d = u.start_date.slice(0, 10);
-      if (!tssByWeek[d]) tssByWeek[d] = 0;
-    }
+    // Diese Woche: TSS-Summe
+    const thisWeekTss = activities.reduce((sum, a) => {
+      const d = (a.start_date || "").slice(0, 10);
+      if (d >= mondayStr && d <= endStr) {
+        const tss = a.icu_training_load ?? a.hr_load ?? a.power_load ?? 0;
+        return sum + (tss || 0);
+      }
+      return sum;
+    }, 0);
 
-    // einfacher: wir nehmen die TSS aus icu_training_load (falls gesetzt)
-    let weeklyBuckets = {};
-    for (const u of units28) {
-      if (!u.start_date) continue;
-      const date = new Date(u.start_date);
-      const dow = (date.getUTCDay() + 6) % 7;
-      const mondayW = new Date(date);
-      mondayW.setUTCDate(mondayW.getUTCDate() - dow);
-      const mondayId = mondayW.toISOString().slice(0, 10);
+    // Letzte 28 Tage: Summe und 4-Wochen-Schnitt
+    const total28 = activities.reduce((sum, a) => {
+      const d = (a.start_date || "").slice(0, 10);
+      if (d >= start28Str && d < mondayStr) {
+        const tss = a.icu_training_load ?? a.hr_load ?? a.power_load ?? 0;
+        return sum + (tss || 0);
+      }
+      return sum;
+    }, 0);
 
-      const load = u.icu_training_load ?? u.hr_load ?? u.pace_load ?? 0;
-      weeklyBuckets[mondayId] = (weeklyBuckets[mondayId] ?? 0) + load;
-    }
+    const last4WeekAvgTss = total28 / 4; // grob 4 Wochen à 7 Tage
 
-    const weekKeys = Object.keys(weeklyBuckets).sort();
-    const last4 = weekKeys.slice(-4);
-    let sum4 = 0;
-    for (const k of last4) sum4 += weeklyBuckets[k];
-    const last4WeekAvgTss = last4.length > 0 ? sum4 / last4.length : null;
+    const units28 = activities.filter(a => {
+      const d = (a.start_date || "").slice(0, 10);
+      return d >= start28Str && d <= mondayStr;
+    });
 
-    const thisWeekTss = weeklyBuckets[mondayStr] ?? 0;
+    // Start-Wochenziel:
+    let startTarget =
+      well[WEEKLY_TARGET_FIELD] ??
+      Math.round(last4WeekAvgTss || 100);
 
-    const progression = await simulate(
-      ctl, atl, state, startTarget,
-      monday, plan,
-      authHeader, ATHLETE_ID,
-      units28, hrMax, ftp,
-      last4WeekAvgTss,
+    // CTL-Forecast & TSS-Berechnung
+    const progression = simulateCtlForecast(
+      ctl,
+      atl,
+      startTarget,
+      monday,
+      plan,
+      units28,
+      hrMax,
+      ftp,
       6
     );
 
-    return new Response(
-      JSON.stringify(
-        {
-          dryRun: true,
-          thisWeek: {
-            monday: mondayStr,
-            weeklyTarget: startTarget,
-            weekState: state,
-            ctl,
-            atl,
-            ramp,
-            thisWeekTss,
-            last4WeekAvgTss
-          },
-          progression
-        },
-        null,
-        2
-      ),
-      { status: 200 }
-    );
+    const responseBody = {
+      dryRun: true,
+      thisWeek: {
+        monday: mondayStr,
+        weeklyTarget: startTarget,
+        weekState,
+        ctl,
+        atl,
+        ramp,
+        thisWeekTss,
+        last4WeekAvgTss
+      },
+      progression
+    };
+
+    return new Response(JSON.stringify(responseBody, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
   } catch (err) {
     return new Response("Error: " + err, { status: 500 });
   }
