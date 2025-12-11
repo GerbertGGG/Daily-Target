@@ -3,9 +3,10 @@ const API_KEY = "API_KEY";
 const API_SECRET = "1xg1v04ym957jsqva8720oo01";
 const ATHLETE_ID = "i105857";
 
-const WEEKLY_TARGET_FIELD = "WochenplanTSS"; // Wochen-TSS-Ziel ins Wellnessfeld
-const PLAN_FIELD = "WochenPlan";             // Phase (Grundlage/Aufbau/Spezifisch)
-const COMMENT_FIELD = "comment";             // Coaching-Notiz ins Kommentarfeld
+// Feldnamen genau wie in Intervals
+const WEEKLY_TARGET_FIELD = "WochenzielTSS"; // <- richtig
+const PLAN_FIELD = "WochenPlan";
+const COMMENT_FIELD = "comment";
 
 const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
@@ -292,7 +293,7 @@ async function handle(dryRun = true) {
     monday.setUTCDate(monday.getUTCDate() - offset);
     const mondayStr = monday.toISOString().slice(0, 10);
 
-    // Aktuellen Wellness-Eintrag (heute) laden (für CTL/ATL etc.)
+    // Wellness von heute laden (für CTL/ATL etc.)
     const wRes = await fetch(
       `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${today}`,
       { headers: { Authorization: authHeader } }
@@ -305,7 +306,7 @@ async function handle(dryRun = true) {
     const atl = well.atl ?? 0;
     const hrMaxGlobal = well.hrMax ?? well.max_hr ?? 173;
 
-    // Letzte 28 Tage Aktivitäten laden
+    // Letzte 28 Tage Aktivitäten
     const start28 = new Date(monday);
     start28.setUTCDate(start28.getUTCDate() - 28);
     const start28Str = start28.toISOString().slice(0, 10);
@@ -364,8 +365,23 @@ async function handle(dryRun = true) {
           body: JSON.stringify(body)
         }
       );
+
       if (!putRes.ok) {
-        return new Response("Error updating wellness", { status: 500 });
+        const putText = await putRes.text();
+        return new Response(
+          JSON.stringify(
+            {
+              error: "Error updating wellness",
+              status: putRes.status,
+              responseBody: putText,
+              requestBody: body,
+              date: mondayStr
+            },
+            null,
+            2
+          ),
+          { status: 500 }
+        );
       }
     }
 
@@ -401,9 +417,6 @@ async function handle(dryRun = true) {
 
 export default {
   async fetch(request, env, ctx) {
-    // Über URL-Parameter steuern, ob geschrieben wird:
-    //   ?write=1   oder   ?write=true   → schreibt
-    //   alles andere / kein Param       → nur Simulation
     const url = new URL(request.url);
     const writeParam = url.searchParams.get("write");
     const shouldWrite =
@@ -415,7 +428,6 @@ export default {
     return handle(dryRun);
   },
   async scheduled(event, env, ctx) {
-    // Cron-Job: schreibt WochenplanTSS, Phase und Coaching-Kommentar
     ctx.waitUntil(handle(false));
   }
 };
