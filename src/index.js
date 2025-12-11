@@ -211,13 +211,72 @@ async function handle(env){
       const currentMarkers = computeMarkers(wellness.units??[]);
       const phaseNow = recommendWeekPhase(currentMarkers, weekState);
       const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
-      const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`;
+      const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${// --- Schreibe Tagesziel (TageszielTSS) & aktuellen Tages-Plan mit verbleibendem Rest ---
+// Berechne verbleibenden TSS dieser Woche: weeklyTargetStart - alreadyDoneTss
+try {
+  // Wochenziel (vorbelegt, aus wellness oder berechnet)
+  const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD] ?? Math.round(dailyTargetBase * 7);
 
-      const payloadToday = {
-        id: today,
-        [INTERVALS_TARGET_FIELD]: Math.round(dailyTargetBase),
-        [INTERVALS_PLAN_FIELD]: dayPlanText
-      };
+  // Zeitraum dieser Woche (Montag .. Sonntag)
+  const todayDateObj = new Date(today + "T00:00:00Z");
+  const jsDay = todayDateObj.getUTCDay();
+  const offset = jsDay === 0 ? 6 : jsDay - 1;
+  const mondayDateObj = new Date(todayDateObj);
+  mondayDateObj.setUTCDate(mondayDateObj.getUTCDate() - offset);
+  const mondayStr = mondayDateObj.toISOString().slice(0,10);
+  const sundayDateObj = new Date(mondayDateObj);
+  sundayDateObj.setUTCDate(sundayDateObj.getUTCDate() + 6);
+  const sundayStr = sundayDateObj.toISOString().slice(0,10);
+
+  // Hole Aktivitäten dieser Woche und summiere schon erledigte TSS (falls API Aktivitäts-TSS liefert)
+  let doneTss = 0;
+  try {
+    const actsRes = await fetch(`${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sundayStr}`, {
+      headers: { Authorization: authHeader }
+    });
+    if (actsRes.ok) {
+      const actsJson = await actsRes.json();
+      const activities = actsJson.activities ?? actsJson.data ?? [];
+      // Summiere nur Aktivitäten bis inkl. heute
+      for (const a of activities) {
+        // a.date / a.start_date sind möglich; best-effort: akzeptiere a.tss oder a.tss_total
+        const aDate = (a.start_date_local || a.start_date || a.date)?.slice(0,10);
+        if (!aDate) continue;
+        if (aDate > today) continue; // zukünftige Einträge ignorieren
+        const t = a.tss ?? a.tss_total ?? a.metrics?.tss ?? 0;
+        doneTss += (typeof t === "number" ? t : Number(t) || 0);
+      }
+    } else {
+      console.error("Failed to fetch activities for week (for doneTss):", actsRes.status, await actsRes.text());
+    }
+  } catch (e) {
+    console.error("Error fetching activities for doneTss:", e);
+  }
+
+  const remaining = Math.max(0, Math.round(weeklyTargetStart - doneTss));
+
+  // Tagesziel als berechneter dailyTargetBase
+  const payloadToday = {
+    id: today,
+    [INTERVALS_TARGET_FIELD]: Math.round(dailyTargetBase),
+    // Per Wunsch: WochenPlan zeigt nur "Rest X" (kein Phase, außer Montag behandeln wir separat)
+    [INTERVALS_PLAN_FIELD]: `Rest ${remaining}`
+  };
+
+  const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify(payloadToday)
+  });
+  if (!updateRes.ok) {
+    const txt = await updateRes.text();
+    console.error("Failed to update today's wellness (target/plan):", updateRes.status, txt);
+  } else {
+    console.log("Updated today's Tagesziel and TagesPlan (Rest):", payloadToday);
+  }
+} catch (e) {
+  console.error("Error writing today's target/plan (rest):", e);
+}
 
       const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
         method: "PUT",
