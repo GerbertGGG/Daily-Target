@@ -110,6 +110,14 @@ function classifyWeek(ctl, atl, rampRate) {
   return { state: "Normal", tsb };
 }
 
+// -------------------- RAMP-RATE-WOCHENZIEL --------------------
+function calculateWeeklyTSSForRampRate({ ctlStart, rampRate, trainingDays = 4 }) {
+  const ctlIncrease = rampRate * 7;
+  const dailyTSS = ctlStart + (ctlIncrease * 42 / 7);
+  const weeklyTSS = dailyTSS * trainingDays;
+  return Math.round(weeklyTSS);
+}
+
 // -------------------- SIMULATION --------------------
 async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, dryRun) {
   const tauCtl = 42;
@@ -252,37 +260,17 @@ async function handle(env, request){
 
     const planSelected = parseTrainingDays(mondayPlanString);
 
-    // Wochenziel berechnen
-    let lastWeekTarget = null;
-    let lastWeekActual = null;
-    try{
-      const lastMonWellRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${lastMondayStr}`, { headers:{Authorization:authHeader} });
-      if (lastMonWellRes.ok){
-        const lastMonWell = await lastMonWellRes.json();
-        lastWeekTarget = lastMonWell[WEEKLY_TARGET_FIELD]??null;
-      }
-    } catch(e){console.error(e);}
-
-    try{
-      const lastWeekRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness?oldest=${lastMondayStr}&newest=${lastSundayStr}&cols=id,ctlLoad`, { headers:{Authorization:authHeader} });
-      if (lastWeekRes.ok){
-        const lastWeekArr = await lastWeekRes.json();
-        lastWeekActual = lastWeekArr.reduce((sum,d)=>sum+(d.ctlLoad??0),0);
-      }
-    } catch(e){console.error(e);}
+    // Wochenziel berechnen mit Ramp-Rate-Steuerung
+    const trainingDaysCount = planSelected.filter(Boolean).length || DEFAULT_TRAINING_DAYS_PER_WEEK;
+    const desiredRampRate = 1.0; // z.B. zwischen 0.8 und 1.3 anpassen
 
     let weeklyTarget;
     if (mondayWeeklyTarget!=null) weeklyTarget = mondayWeeklyTarget;
-    else weeklyTarget = Math.round(calculateTSS({
-      ctl: ctlMon,
-      atl: atlMon,
-      rampRate,
-      weekState,
-      planSelected,
-      weeklyTarget: lastWeekTarget||150,
-      weeklyLoadSoFar: 0,
-      dayIdx:0
-    }));
+    else weeklyTarget = calculateWeeklyTSSForRampRate({
+      ctlStart: ctlMon,
+      rampRate: desiredRampRate,
+      trainingDays: trainingDaysCount
+    });
 
     // Woche laden
     let weekLoadUntilYesterday=0;
@@ -343,7 +331,6 @@ async function handle(env, request){
       return new Response(JSON.stringify({
         dryRun:true,
         thisWeek:{ monday:mondayStr, weeklyTarget, alreadyDone:weekLoadUntilYesterday },
-        lastWeek:{ monday:lastMondayStr, target:lastWeekTarget, actual:lastWeekActual },
         weeklyProgression: futureWeeks.map(w=>({weekOffset:w.weekOffset, monday:w.monday, weeklyTarget:w.weeklyTarget, state:w.state}))
       }, null, 2), { status:200, headers:{"Content-Type":"application/json"} });
     }
