@@ -90,23 +90,107 @@ function classifyWeek(ctl, atl, rampRate) {
 function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   if (!Array.isArray(units)) units = [];
 
-  // --- ACWR ---
+  // -------------------------
+  // ACWR
+  // -------------------------
   const acwr = ctl > 0 ? atl / ctl : null;
 
-  // --- Intensitätsverteilung ---
+  // -------------------------
+  // Polarisation (HF-basiert)
+  // Z1-Z2: ≤ 80% HFmax
+  // Z3-Z5: > 80% HFmax
+  // -------------------------
   let z1z2 = 0, z3z5 = 0, total = 0;
 
   for (const u of units) {
-    if (!u.duration || u.hrAvg == null || hrMax <= 0) continue;
+    const dur = (u.duration ?? u.moving_time ?? 0) / 60; // in Minuten
+    if (dur <= 0) continue;
 
-    const durMin = u.duration / 60;
-    const hrRel = u.hrAvg / hrMax;
+    const hr = u.hrAvg;
+    if (hr == null || hrMax <= 0) continue;
 
-    total += durMin;
+    total += dur;
+    const hrRel = hr / hrMax;
 
-    if (hrRel <= 0.80) z1z2 += durMin;
-    else z3z5 += durMin;
+    if (hrRel <= 0.80) z1z2 += dur;
+    else z3z5 += dur;
   }
+
+  const polarisationIndex = total > 0 ? z1z2 / total : null;
+
+  // -------------------------
+  // Quality Sessions (physiologisch)
+  // ≥90% HFmax ODER Power-Peaks
+  // -------------------------
+  const qualitySessions = units.filter(u => {
+    const hr = u.hrAvg;
+    const power = u.wattsMax ?? u.wattsAvg ?? null;
+
+    if (hr != null && hr / hrMax >= 0.90) return true;
+    if (ftp > 0 && power != null && power >= ftp * 1.15) return true;
+
+    return false;
+  }).length;
+
+  // -------------------------
+  // GA / Z2 Decoupling (San Millán)
+  // Kriterien:
+  // - mind. 30 Min
+  // - HF ≤ 85% HFmax
+  // - Leistung ≤ 85–90% FTP
+  // -------------------------
+  const gaUnits = units.filter(u => {
+    const dur = (u.duration ?? u.moving_time ?? 0) / 60;
+    const hr = u.hrAvg;
+    const power = u.wattsAvg ?? null;
+
+    if (dur < 30) return false;
+    if (hr == null) return false;
+    if (hr > 0.85 * hrMax) return false;
+
+    // Power optional
+    if (ftp > 0 && power != null && power > ftp * 0.90) return false;
+
+    return true;
+  });
+
+  let decoupling = null;
+  if (gaUnits.length > 0) {
+    const sum = gaUnits.reduce((acc, u) => {
+      const hr = u.hrAvg;
+      const p = u.wattsAvg ?? null;
+
+      // Wenn Power fehlt → "leichter" Algorithmus
+      if (p == null || p <= 0)
+        return acc; // oder: hr-relativ, aber bei fehlender Power nicht ideal
+
+      const ratio = (hr / p) - 1;
+      return acc + ratio;
+    }, 0);
+
+    decoupling = sum / gaUnits.length;
+  }
+
+  // -------------------------
+  // PDC
+  // -------------------------
+  let pdc = null;
+  const peaks = units
+    .map(u => u.wattsMax ?? u.wattsAvg)
+    .filter(v => v != null && v > 0);
+
+  if (peaks.length > 0 && ftp > 0)
+    pdc = Math.max(...peaks) / ftp;
+
+  return {
+    decoupling,
+    pdc,
+    polarisationIndex,
+    qualitySessions,
+    acwr
+  };
+}
+
 
   const polarisationIndex = total > 0 ? z1z2 / total : null;
 
