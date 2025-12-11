@@ -2,6 +2,8 @@ var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
 // src/index.js
+var __defProp2 = Object.defineProperty;
+var __name2 = /* @__PURE__ */ __name((target, value) => __defProp2(target, "name", { value, configurable: true }), "__name");
 var BASE_URL = "https://intervals.icu/api/v1";
 var INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 var INTERVALS_ATHLETE_ID = "i105857";
@@ -13,6 +15,7 @@ function dayIdxFromJsDay(jsDay) {
   return jsDay === 0 ? 6 : jsDay - 1;
 }
 __name(dayIdxFromJsDay, "dayIdxFromJsDay");
+__name2(dayIdxFromJsDay, "dayIdxFromJsDay");
 function parseTrainingDays(str) {
   if (!str || typeof str !== "string") return new Array(7).fill(false);
   const tokens = str.split(/[,\s;]+/).map((t) => t.trim()).filter((t) => t.length > 0);
@@ -35,10 +38,12 @@ function parseTrainingDays(str) {
   return selected;
 }
 __name(parseTrainingDays, "parseTrainingDays");
+__name2(parseTrainingDays, "parseTrainingDays");
 function stateEmoji(state) {
   return state === "Erholt" ? "\u{1F525}" : state === "M\xFCde" ? "\u{1F9D8}" : "\u2696\uFE0F";
 }
 __name(stateEmoji, "stateEmoji");
+__name2(stateEmoji, "stateEmoji");
 function computeDailyTarget(ctl, atl) {
   const tsb = ctl - atl;
   const tsbClamped = Math.max(-20, Math.min(20, tsb));
@@ -47,6 +52,7 @@ function computeDailyTarget(ctl, atl) {
   return Math.round(Math.max(0, Math.min(daily, ctl * 1.5)));
 }
 __name(computeDailyTarget, "computeDailyTarget");
+__name2(computeDailyTarget, "computeDailyTarget");
 function classifyWeek(ctl, atl, rampRate) {
   const tsb = ctl - atl;
   let tsbCritical = ctl < 50 ? -5 : ctl < 80 ? -10 : -15;
@@ -61,6 +67,7 @@ function classifyWeek(ctl, atl, rampRate) {
   return { state: "Normal", tsb };
 }
 __name(classifyWeek, "classifyWeek");
+__name2(classifyWeek, "classifyWeek");
 function computeMarkers(units) {
   if (!Array.isArray(units)) return { decoupling: null, pdc: null };
   const gaUnits = units.filter((u) => u.zone === "GA1" && u.duration >= 20);
@@ -69,6 +76,7 @@ function computeMarkers(units) {
   return { decoupling, pdc };
 }
 __name(computeMarkers, "computeMarkers");
+__name2(computeMarkers, "computeMarkers");
 function recommendWeekPhase(lastWeekMarkers, simState) {
   const decupling = lastWeekMarkers?.decupling ?? 999;
   const pdc = lastWeekMarkers?.pdc ?? 0;
@@ -80,6 +88,7 @@ function recommendWeekPhase(lastWeekMarkers, simState) {
   return phase;
 }
 __name(recommendWeekPhase, "recommendWeekPhase");
+__name2(recommendWeekPhase, "recommendWeekPhase");
 async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, units, weeksToSim) {
   const tauCtl = 42, tauAtl = 7;
   let dayWeights = new Array(7).fill(0), countSelected = 0;
@@ -147,6 +156,7 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
   return weeklyProgression;
 }
 __name(simulatePlannedWeeks, "simulatePlannedWeeks");
+__name2(simulatePlannedWeeks, "simulatePlannedWeeks");
 async function handle(env) {
   try {
     const apiKey = INTERVALS_API_KEY;
@@ -199,6 +209,7 @@ async function handle(env) {
   }
 }
 __name(handle, "handle");
+__name2(handle, "handle");
 var index_default = {
   async fetch(request, env, ctx) {
     return handle(env);
