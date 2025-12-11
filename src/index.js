@@ -211,7 +211,7 @@ async function handle(env){
       const currentMarkers = computeMarkers(wellness.units??[]);
       const phaseNow = recommendWeekPhase(currentMarkers, weekState);
       const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
-      const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`;
+      const dayPlanText = `Phase: ${phaseNow}`;
 
       const payloadToday = {
         id: today,
