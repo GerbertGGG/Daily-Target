@@ -345,7 +345,7 @@ async function handle(dryRun = true) {
       decStats
     });
 
-    // Am Wochen-Montag schreiben
+    // Am Wochen-Montag schreiben (oder nur simulieren)
     if (!dryRun) {
       const body = {
         [WEEKLY_TARGET_FIELD]: weeklyTargetTss,
@@ -401,8 +401,18 @@ async function handle(dryRun = true) {
 
 export default {
   async fetch(request, env, ctx) {
-    // HTTP-Aufruf: nur anschauen, nichts schreiben
-    return handle(true);
+    // Über URL-Parameter steuern, ob geschrieben wird:
+    //   ?write=1   oder   ?write=true   → schreibt
+    //   alles andere / kein Param       → nur Simulation
+    const url = new URL(request.url);
+    const writeParam = url.searchParams.get("write");
+    const shouldWrite =
+      writeParam === "1" ||
+      writeParam === "true" ||
+      writeParam === "yes";
+
+    const dryRun = !shouldWrite;
+    return handle(dryRun);
   },
   async scheduled(event, env, ctx) {
     // Cron-Job: schreibt WochenplanTSS, Phase und Coaching-Kommentar
