@@ -279,16 +279,16 @@ function extractGaDecouplingStats(activities, hrMaxGlobal) {
  */
 function decidePhaseFromDecoupling(medianDecoupling) {
   if (medianDecoupling == null) {
-    return "Grundlage";
+    return "nur Grundlage";
   }
 
   if (medianDecoupling < 0.05) {
-    return "Intensiv";
+    return "lange Intervalle";
   }
   if (medianDecoupling < 0.08) {
-    return "Aufbau";
+    return "kurzen Intervallen";
   }
-  return "Grundlage";
+  return "nur Grundlage";
 }
 
 //----------------------------------------------------------
