@@ -1,5 +1,3 @@
-// Erweiterte Version deines ursprünglichen Codes mit FatOxidation Integration (San Millán)
-
 const BASE_URL = "https://intervals.icu/api/v1";
 const API_KEY = "API_KEY";
 const API_SECRET = "1xg1v04ym957jsqva8720oo01";
@@ -326,36 +324,11 @@ async function extractRunDecouplingStats(activities, hrMaxGlobal, authHeader, de
   };
 }
 
-// --- San Millán FatOx Logic ---
-function computeFatOxIndex(ifVal, drift) {
-  if (!ifVal || drift == null) return null;
-  const ifScore = 1 - Math.abs(ifVal - 0.7) / 0.1;
-  const driftScore = 1 - drift / 10;
-  const val = ifScore * driftScore;
-  return Math.max(0, Math.min(1, val));
-}
-
-function fatOxEval(val) {
-  if (val == null) return "no_data";
-  if (val >= 0.8) return "✅ Optimal";
-  if (val >= 0.6) return "⚠ Moderate";
-  return "❌ Low";
-}
 function decidePhaseFromRunDecoupling(medianDrift) {
   if (medianDrift == null) return "Grundlage";
   if (medianDrift > 0.07) return "Grundlage";
   if (medianDrift > 0.04) return "Aufbau";
   return "Spezifisch";
-}
-
-function decidePhaseFromRunDecouplingAndFatOx(medianDrift, fatOx) {
-  if (fatOx == null) return decidePhaseFromRunDecoupling(medianDrift);
-
-  if (fatOx >= 0.85 && medianDrift <= 0.07) return "Aufbau";
-  if (fatOx >= 0.8 && medianDrift <= 0.1) return "Aufbau";
-  if (fatOx >= 0.75 && medianDrift > 0.1) return "Konsolidierung";
-  if (fatOx < 0.6) return "Grundlage";
-  return decidePhaseFromRunDecoupling(medianDrift);
 }
 
 // ---------------- MAIN ----------------
@@ -401,34 +374,21 @@ async function handle(dryRun = true) {
     }
 
     const decStats = await extractRunDecouplingStats(activities, hrMaxGlobal, authHeader, debug);
-    const medianDrift = decStats.medianDrift;
-
-    // FatOx aus IF-Median und Drift berechnen
-    const ifValues = activities.filter(a => a.IF && a.type?.includes("Run")).map(a => a.IF);
-    const medianIf = median(ifValues);
-    const fatOx = computeFatOxIndex(medianIf, medianDrift);
-    const fatEval = fatOxEval(fatOx);
-
-    // Phase bestimmen mit FatOx-Einfluss
-    const phase = decidePhaseFromRunDecouplingAndFatOx(medianDrift, fatOx);
+    const phase = decidePhaseFromRunDecoupling(decStats.medianDrift);
 
     debug.phaseReason =
-      medianDrift == null
+      decStats.medianDrift == null
         ? "medianDrift=null -> phase=Grundlage"
-        : `medianDrift=${(medianDrift * 100).toFixed(2)}% · FatOx=${fatOx?.toFixed(2)} -> phase=${phase}`;
-
-    // bereits oben berechnet – hier nicht erneut deklarieren
-
+        : `medianDrift=${(decStats.medianDrift * 100).toFixed(2)}% -> phase=${phase}`;
 
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
-   const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
+    const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
 
     if (!dryRun) {
       const body = {
         [WEEKLY_TARGET_FIELD]: weeklyTargetTss,
-        [PLAN_FIELD]: phase,
-        comments: `🧭 Woche ab ${mondayStr}\nPhase: ${phase} (Decoupling ${(medianDrift * 100).toFixed(1)}%)\nFatOx ${(fatOx * 100).toFixed(0)}% → ${fatEval}\nZiel: ${weeklyTargetTss} TSS · CTL Δ${thisWeekPlan.ctlDelta.toFixed(1)} · ACWR ${thisWeekPlan.acwr?.toFixed(2)}`
+        [PLAN_FIELD]: phase
       };
       const putRes = await fetch(
         `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`,
@@ -459,8 +419,6 @@ async function handle(dryRun = true) {
         ctlDelta: thisWeekPlan.ctlDelta,
         acwr: thisWeekPlan.acwr,
         phase,
-        fatOx: Number(fatOx?.toFixed(2)),
-        fatOxEval: fatEval,
         runDecoupling: {
           ...decStats,
           medianDriftPercent:
@@ -480,11 +438,9 @@ async function handle(dryRun = true) {
 
 export default {
   async fetch(request, env, ctx) {
-    // Vorschau nur ansehen
-    return handle(true);
+    return handle(true); // HTTP = nur anschauen
   },
   async scheduled(event, env, ctx) {
-    // Montag = automatisch schreiben
-    ctx.waitUntil(handle(false));
+    ctx.waitUntil(handle(false)); // Cron = schreiben
   }
 };
