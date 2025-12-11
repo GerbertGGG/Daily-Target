@@ -10,16 +10,15 @@ const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const PLAN_FIELD = "WochenPlan"; // hier schreiben wir die Phase rein
 
 //----------------------------------------------------------
-// CTL-/ATL-Logik (0.8 CTL/Woche + Deload bei zu hohem ACWR oder ATL)
+// CTL-/ATL-Logik (0.8 CTL/Woche + Deload über ACWR/ATL)
 //----------------------------------------------------------
 
 // fixe Ziel-Steigerung pro Woche
 const CTL_DELTA_TARGET = 0.8;
 
 // ACWR-Bereiche
-// 0.8–1.3  = ideal
-// 1.3–1.5  = erhöhtes Risiko
-// >1.5     = hochriskant, Deload
+// 0.8–1.3  = ideal (Soft-Limit)
+// >= 1.5   = hochriskant, Deload
 const ACWR_SOFT_MAX = 1.3;
 const ACWR_HARD_MAX = 1.5;
 
@@ -27,40 +26,42 @@ const ACWR_HARD_MAX = 1.5;
 const DELOAD_FACTOR = 0.9;
 
 /**
- * ATL-Bänder in Abhängigkeit vom CTL (deine Tabelle)
+ * Feste ATL-Deckel in Abhängigkeit vom CTL:
  *
- * CTL < 30   -> ATL 25–45
- * CTL 30–60  -> ATL 40–70
- * CTL 60–90  -> ATL 60–95
- * CTL 90–130 -> ATL 80–140
+ * CTL < 30    -> ATL-Max = 30
+ * CTL 30–60   -> ATL-Max = 45
+ * CTL 60–90   -> ATL-Max = 65
+ * CTL >= 90   -> ATL-Max = 85
  */
-function getAtlBand(ctl) {
-  if (ctl < 30) {
-    return { minAtl: 25, maxAtl: 45 };
-  } else if (ctl < 60) {
-    return { minAtl: 40, maxAtl: 70 };
-  } else if (ctl < 90) {
-    return { minAtl: 60, maxAtl: 95 };
-  } else {
-    return { minAtl: 80, maxAtl: 140 };
-  }
+function getAtlMax(ctl) {
+  if (ctl < 30) return 30;
+  if (ctl < 60) return 45;
+  if (ctl < 90) return 65;
+  return 85;
 }
 
 /**
- * Prüft, ob eine Entlastungswoche sinnvoll ist.
+ * Prüft, ob eine Entlastungswoche nötig ist.
  *
- * Kriterien:
- *  1) ACWR >= 1.5  → immer Deload
- *  2) ATL > maxAtl (absolut zu hoch) → Deload
+ * Deload, wenn:
+ *  - ACWR >= 1.5
+ *  - ODER ATL > ATL-Max (harte, fixe Grenze)
  */
 function shouldDeload(ctl, atl) {
-  if (ctl <= 0) return false;
+  const atlMax = getAtlMax(ctl);
+  let acwr = null;
 
-  const acwr = atl / ctl;
-  const { maxAtl } = getAtlBand(ctl);
+  if (ctl > 0) {
+    acwr = atl / ctl;
+  }
 
-  if (acwr >= ACWR_HARD_MAX) return true;
-  if (atl > maxAtl) return true;
+  if (acwr != null && acwr >= ACWR_HARD_MAX) {
+    return true;
+  }
+
+  if (atl > atlMax) {
+    return true;
+  }
 
   return false;
 }
@@ -68,7 +69,13 @@ function shouldDeload(ctl, atl) {
 /**
  * Max. CTL-Delta, damit ACWR nach der Woche im "grünen" Bereich bleibt.
  *
+ * Modell:
+ *   ΔCTL ≈ (TSS_mean - CTL) / 6
+ *   TSS_mean = CTL + 6d
+ *   ATL_next ≈ TSS_mean
+ *   CTL_next = CTL + d
  *   ACWR_next = (CTL + 6d) / (CTL + d) <= ACWR_SOFT_MAX
+ *
  *   => d_max = ((ACWR_SOFT_MAX - 1) / (6 - ACWR_SOFT_MAX)) * CTL
  */
 function maxSafeCtlDelta(ctl) {
@@ -130,8 +137,8 @@ function computeDeloadWeek(ctl, atl) {
 /**
  * NUR nächste Woche aus CTL/ATL berechnen:
  * - Standardziel: +0.8 CTL/Woche
- * - begrenzt durch ACWR
- * - Deload bei zu hohem ACWR oder ATL (absolut)
+ * - begrenzt durch ACWR (Soft-Limit 1.3)
+ * - Deload bei ACWR >= 1.5 ODER ATL > ATL-Max
  */
 function calcNextWeekTarget(ctl, atl) {
   if (shouldDeload(ctl, atl)) {
@@ -142,9 +149,11 @@ function calcNextWeekTarget(ctl, atl) {
   let targetDelta = CTL_DELTA_TARGET;
 
   if (!isFinite(dMaxSafe) || dMaxSafe <= 0) {
-    targetDelta = 0; // Erhaltungswoche
+    // ACWR lässt keine Steigerung zu → Erhaltungswoche
+    targetDelta = 0;
   } else if (dMaxSafe < targetDelta) {
-    targetDelta = dMaxSafe; // ACWR-limit
+    // ACWR würde bei 0.8 zu hoch → auf sicheres Maximum begrenzen
+    targetDelta = dMaxSafe;
   }
 
   return computeWeekFromCtlDelta(ctl, atl, targetDelta);
@@ -190,9 +199,6 @@ function simulateFutureWeeks(ctlStart, atlStart, mondayDate, weeks, week0) {
 // DECOUPLING / GRUNDLAGE-ANALYSE über 28 Tage
 //----------------------------------------------------------
 
-/**
- * Median-Helfer
- */
 function median(values) {
   if (!values || values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -205,9 +211,12 @@ function median(values) {
 
 /**
  * GA-Filter:
- * - nur Einheiten mit HF-Daten
- * - HFmax der Einheit <= 85 % globaler HFmax
- * - Dauer: Run >= 45 min, Ride >= 60 min, sonst >= 45 min
+ * - HF-Daten vorhanden
+ * - HFmax der Einheit ≤ 85 % der globalen HFmax
+ * - Dauer:
+ *    - Run ≥ 45 min
+ *    - Ride ≥ 60 min
+ *    - sonst ≥ 45 min
  */
 function isGaSession(a, hrMaxGlobal) {
   if (!hrMaxGlobal || hrMaxGlobal <= 0) return false;
@@ -231,7 +240,6 @@ function isGaSession(a, hrMaxGlobal) {
 
   if (durationSec < minDuration) return false;
 
-  // harte Grenze: HFmax der Einheit darf nicht über 85 % der globalen HFmax gehen
   const hfMaxLimit = 0.85 * hrMaxGlobal;
   if (hrMax > hfMaxLimit) return false;
 
@@ -256,7 +264,6 @@ function extractGaDecouplingStats(activities, hrMaxGlobal) {
 
     if (driftRaw == null || !isFinite(driftRaw)) continue;
 
-    // Sicherheitshalber absolut nehmen
     const drift = Math.abs(driftRaw);
     decouplings.push(drift);
   }
@@ -271,31 +278,31 @@ function extractGaDecouplingStats(activities, hrMaxGlobal) {
 /**
  * Phase aus Decoupling ableiten:
  *
- * < 5 %   -> "Intensiv"         (Grundlage sehr stabil, ballern erlaubt)
- * 5–8 %   -> "Aufbau"           (Fundament okay, weiter ausbauen, vorsichtige Intervalle)
- * >= 8 %  -> "Grundlage"        (Fundament noch schwach, Fokus GA)
+ * < 5 %   -> "Spezifisch"
+ * 5–8 %   -> "Aufbau"
+ * >= 8 %  -> "Grundlage"
  *
- * Wenn keine Daten -> konservativ "Grundlage".
+ * Keine Daten -> konservativ "Grundlage".
  */
 function decidePhaseFromDecoupling(medianDecoupling) {
   if (medianDecoupling == null) {
-    return "nur Grundlage";
+    return "Grundlage";
   }
 
   if (medianDecoupling < 0.05) {
-    return "lange Intervalle";
+    return "Spezifisch";
   }
   if (medianDecoupling < 0.08) {
-    return "kurzen Intervallen";
+    return "Aufbau";
   }
-  return "nur Grundlage";
+  return "Grundlage";
 }
 
 //----------------------------------------------------------
 // MAIN HANDLER
 //----------------------------------------------------------
 // dryRun = true   => nur berechnen, NICHT schreiben
-// dryRun = false  => berechnen und in Wellness-Feld schreiben
+// dryRun = false  => berechnen und in Wellness schreiben
 async function handle(dryRun = true) {
   try {
     const authHeader = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
@@ -309,7 +316,7 @@ async function handle(dryRun = true) {
     monday.setUTCDate(monday.getUTCDate() - offset);
     const mondayStr = monday.toISOString().slice(0, 10);
 
-    // Wellness für heute holen (aktuelles CTL/ATL)
+    // Wellness für heute holen (aktuelles CTL/ATL/HRmax)
     const wRes = await fetch(
       `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${today}`,
       { headers: { Authorization: authHeader } }
@@ -404,12 +411,13 @@ async function handle(dryRun = true) {
             monday: mondayStr,
             ctl,
             atl,
+            atlMax: getAtlMax(ctl),
             hrMaxGlobal,
             weekType: thisWeekPlan.weekType,  // BUILD / MAINTAIN / DELOAD
             weeklyTargetTss,
             ctlDelta: thisWeekPlan.ctlDelta,
             acwr: thisWeekPlan.acwr,
-            phase,                             // Grundlage / Aufbau / Intensiv
+            phase,                             // Grundlage | Aufbau | Spezifisch
             decoupling: decStats
           },
           progression
@@ -430,7 +438,7 @@ async function handle(dryRun = true) {
 //----------------------------------------------------------
 export default {
   async fetch(request, env, ctx) {
-    // nur schauen, nichts schreiben
+    // nur anschauen, nichts schreiben
     return handle(true);
   },
   async scheduled(event, env, ctx) {
@@ -438,3 +446,4 @@ export default {
     ctx.waitUntil(handle(false)); // berechnet & schreibt WochenzielTSS + Phase
   }
 };
+
