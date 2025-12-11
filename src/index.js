@@ -3,7 +3,7 @@
 //----------------------------------------------------------
 const BASE_URL = "https://intervals.icu/api/v1";
 
-// ⚠️ Später als Secret hinterlegen
+// ⚠️ später als Secret speichern
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
@@ -54,7 +54,7 @@ function stateEmoji(state) {
 }
 
 //----------------------------------------------------------
-// CTL / ATL / MÜDIGKEIT
+// CTL / ATL / FATIGUE
 //----------------------------------------------------------
 function computeDailyTarget(ctl, atl) {
   const tsb = ctl - atl;
@@ -71,21 +71,18 @@ function classifyWeek(ctl, atl, rampRate) {
   else if (ctl < 80) tsbCritical = -10;
   else tsbCritical = -15;
 
-  const isTsbTired = tsb <= tsbCritical;
-  const atlCtlRatio = ctl > 0 ? atl / ctl : Infinity;
-  const isAtlHigh = atlCtlRatio >= (ctl < 50 ? 1.2 : ctl < 80 ? 1.3 : 1.4);
-
+  const isTiredTSB = tsb <= tsbCritical;
+  const isAtlHigh = atl / ctl >= (ctl < 50 ? 1.2 : ctl < 80 ? 1.3 : 1.4);
   const isRampHigh = rampRate >= 1.0;
-  const isRampLowAndFresh = rampRate <= -0.5 && tsb >= -5;
+  const isRampLowFresh = rampRate <= -0.5 && tsb >= -5;
 
-  if (isRampLowAndFresh) return { state: "Erholt", tsb };
-  if (isRampHigh || isTsbTired || isAtlHigh) return { state: "Müde", tsb };
-
+  if (isRampLowFresh) return { state: "Erholt", tsb };
+  if (isRampHigh || isTiredTSB || isAtlHigh) return { state: "Müde", tsb };
   return { state: "Normal", tsb };
 }
 
 //----------------------------------------------------------
-// MARKER: Aerob, Anaerob, Polarisation, ACWR (28 Tage!)
+// MARKER — Physiological Classification (Option A)
 //----------------------------------------------------------
 function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   if (!Array.isArray(units)) units = [];
@@ -97,13 +94,11 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
 
   // -------------------------
   // Polarisation (HF-basiert)
-  // Z1-Z2: ≤ 80% HFmax
-  // Z3-Z5: > 80% HFmax
   // -------------------------
   let z1z2 = 0, z3z5 = 0, total = 0;
 
   for (const u of units) {
-    const dur = (u.duration ?? u.moving_time ?? 0) / 60; // in Minuten
+    const dur = (u.duration ?? u.moving_time ?? 0) / 60; 
     if (dur <= 0) continue;
 
     const hr = u.hrAvg;
@@ -119,37 +114,30 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   const polarisationIndex = total > 0 ? z1z2 / total : null;
 
   // -------------------------
-  // Quality Sessions (physiologisch)
-  // ≥90% HFmax ODER Power-Peaks
+  // Quality Sessions (HF ≥ 90% oder Power ≥ FTP*1.15)
   // -------------------------
   const qualitySessions = units.filter(u => {
     const hr = u.hrAvg;
     const power = u.wattsMax ?? u.wattsAvg ?? null;
 
     if (hr != null && hr / hrMax >= 0.90) return true;
-    if (ftp > 0 && power != null && power >= ftp * 1.15) return true;
-
+    if (power != null && ftp > 0 && power >= ftp * 1.15) return true;
     return false;
   }).length;
 
   // -------------------------
-  // GA / Z2 Decoupling (San Millán)
-  // Kriterien:
-  // - mind. 30 Min
-  // - HF ≤ 85% HFmax
-  // - Leistung ≤ 85–90% FTP
+  // GA-Decoupling
   // -------------------------
   const gaUnits = units.filter(u => {
     const dur = (u.duration ?? u.moving_time ?? 0) / 60;
     const hr = u.hrAvg;
-    const power = u.wattsAvg ?? null;
+    const p = u.wattsAvg ?? null;
 
     if (dur < 30) return false;
     if (hr == null) return false;
     if (hr > 0.85 * hrMax) return false;
 
-    // Power optional
-    if (ftp > 0 && power != null && power > ftp * 0.90) return false;
+    if (p != null && ftp > 0 && p > ftp * 0.90) return false;
 
     return true;
   });
@@ -158,14 +146,9 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   if (gaUnits.length > 0) {
     const sum = gaUnits.reduce((acc, u) => {
       const hr = u.hrAvg;
-      const p = u.wattsAvg ?? null;
-
-      // Wenn Power fehlt → "leichter" Algorithmus
-      if (p == null || p <= 0)
-        return acc; // oder: hr-relativ, aber bei fehlender Power nicht ideal
-
-      const ratio = (hr / p) - 1;
-      return acc + ratio;
+      const p = u.wattsAvg;
+      if (!p || p <= 0) return acc; 
+      return acc + ((hr / p) - 1);
     }, 0);
 
     decoupling = sum / gaUnits.length;
@@ -191,118 +174,71 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   };
 }
 
-
-  const polarisationIndex = total > 0 ? z1z2 / total : null;
-
-  // --- Quality Sessions ---
-  const qualitySessions = units.filter(u =>
-    ["Interval", "VO2Max", "Sprint", "Threshold"].includes(u.type)
-  ).length;
-
-  // --- Decoupling / Durability ---
-  const gaUnits = units.filter(u =>
-    u.duration >= 1800 && // mind. 30 min
-    u.hrAvg != null &&
-    u.wattsAvg != null &&
-    u.wattsAvg > 0 &&
-    u.hrAvg <= 0.85 * hrMax &&
-    ["Endurance", "LongRide", "Ride", "Run"].includes(u.type)
-  );
-
-  let decoupling = null;
-  if (gaUnits.length > 0) {
-    const sum = gaUnits.reduce((acc, u) =>
-      acc + ((u.hrAvg / u.wattsAvg) - 1)
-    , 0);
-    decoupling = sum / gaUnits.length;
-  }
-
-  // --- PDC ---
-  let pdc = null;
-  const peaks = units
-    .map(u => u.wattsMax ?? u.wattsAvg)
-    .filter(v => v != null && v > 0);
-
-  if (peaks.length > 0 && ftp > 0)
-    pdc = Math.max(...peaks) / ftp;
-
-  return {
-    decoupling,
-    pdc,
-    polarisationIndex,
-    qualitySessions,
-    acwr
-  };
-}
-
 //----------------------------------------------------------
 // FITNESS SCORES
 //----------------------------------------------------------
 function computeFitnessScores(m) {
   const score = {};
 
-  // Aerob
-  if (m.decoupling == null) score.aerobic = "🟡 (zu wenig GA)";
-  else if (m.decoupling <= 0.05) score.aerobic = "🟢";
-  else if (m.decoupling <= 0.08) score.aerobic = "🟡";
-  else score.aerobic = "🔴";
+  score.aerobic =
+    m.decoupling == null ? "🟡 (zu wenig GA)"
+    : m.decoupling <= 0.05 ? "🟢"
+    : m.decoupling <= 0.08 ? "🟡"
+    : "🔴";
 
-  // Polarisation
-  if (m.polarisationIndex == null) score.polarisation = "🟡 (keine HR)";
-  else if (m.polarisationIndex >= 0.80) score.polarisation = "🟢";
-  else if (m.polarisationIndex >= 0.70) score.polarisation = "🟡";
-  else score.polarisation = "🔴";
+  score.polarisation =
+    m.polarisationIndex == null ? "🟡 (keine HR)"
+    : m.polarisationIndex >= 0.80 ? "🟢"
+    : m.polarisationIndex >= 0.70 ? "🟡"
+    : "🔴";
 
-  // Anaerob
-  if (m.pdc == null) score.anaerobic = "🟡 (zu wenig Daten)";
-  else if (m.pdc >= 0.95 && m.qualitySessions >= 2) score.anaerobic = "🟢";
-  else if (m.pdc >= 0.85 && m.qualitySessions >= 1) score.anaerobic = "🟡";
-  else score.anaerobic = "🔴";
+  score.anaerobic =
+    m.pdc == null ? "🟡 (zu wenig Daten)"
+    : m.pdc >= 0.95 && m.qualitySessions >= 2 ? "🟢"
+    : m.pdc >= 0.85 && m.qualitySessions >= 1 ? "🟡"
+    : "🔴";
 
-  // Workload
-  if (m.acwr == null) score.workload = "🟡";
-  else if (m.acwr >= 0.8 && m.acwr <= 1.3) score.workload = "🟢";
-  else if (m.acwr >= 0.7 && m.acwr <= 1.4) score.workload = "🟡";
-  else score.workload = "🔴";
+  score.workload =
+    m.acwr == null ? "🟡"
+    : (m.acwr >= 0.8 && m.acwr <= 1.3) ? "🟢"
+    : (m.acwr >= 0.7 && m.acwr <= 1.4) ? "🟡"
+    : "🔴";
 
   return score;
 }
 
 //----------------------------------------------------------
-// WOCHENPHASE (verbessert, robust)
+// WEEK PHASE LOGIC
 //----------------------------------------------------------
-function recommendWeekPhaseV2(scores, fatigueState) {
+function recommendWeekPhaseV2(scores, fatigue) {
+  if (fatigue === "Müde") return "Erholung";
 
-  if (fatigueState === "Müde") return "Erholung";
-
-  const { aerobic, anaerobic, polarisation, workload } = scores;
-
-  const reds = [aerobic, anaerobic, polarisation, workload]
-    .filter(s => s.includes("🔴")).length;
-
+  const reds = Object.values(scores).filter(s => s.includes("🔴")).length;
   if (reds >= 2) return "Grundlage (Reset)";
-  if (aerobic.includes("🔴") || polarisation.includes("🔴")) return "Grundlage";
-  if (anaerobic.includes("🟡") || anaerobic.includes("🔴")) return "Intensiv";
+  if (scores.aerobic.includes("🔴") || scores.polarisation.includes("🔴"))
+    return "Grundlage";
+  if (scores.anaerobic.includes("🟡") || scores.anaerobic.includes("🔴"))
+    return "Intensiv";
 
   return "Aufbau";
 }
+
 //----------------------------------------------------------
-// 6-WOCHEN-SIMULATION
+// SIMULATION (6 Wochen)
 //----------------------------------------------------------
 async function simulateWeeks(
-  ctlStart, atlStart, fatigueStateStart, weeklyTargetStart,
+  ctlStart, atlStart, fatigueStart, weeklyTargetStart,
   mondayDate, planSelected, authHeader, athleteId,
   units28, hrMax, ftp, weeksToSim
 ) {
-
   const tauCtl = 42;
   const tauAtl = 7;
 
   let dayWeights = new Array(7).fill(0);
   for (let i = 0; i < 7; i++) if (planSelected[i]) dayWeights[i] = 1;
 
-  let sumWeights = dayWeights.reduce((a, b) => a + b, 0);
-  if (sumWeights === 0) { dayWeights = [1,0,1,0,1,0,1]; sumWeights = 4; }
+  let sumW = dayWeights.reduce((a, b) => a + b, 0);
+  if (sumW === 0) { dayWeights = [1,0,1,0,1,0,1]; sumW = 4; }
 
   let ctl = ctlStart;
   let atl = atlStart;
@@ -311,12 +247,10 @@ async function simulateWeeks(
   const progression = [];
 
   for (let w = 1; w <= weeksToSim; w++) {
-
     const ctlStartW = ctl;
 
-    // CTL/ATL Simulation über die Woche
     for (let d = 0; d < 7; d++) {
-      const load = prevTarget * (dayWeights[d] / sumWeights);
+      const load = prevTarget * (dayWeights[d] / sumW);
       ctl = ctl + (load - ctl) / tauCtl;
       atl = atl + (load - atl) / tauAtl;
     }
@@ -324,31 +258,26 @@ async function simulateWeeks(
     const ramp = ctl - ctlStartW;
     const { state: weekState } = classifyWeek(ctl, atl, ramp);
 
-    // Marker & Scores aus 28 Tagen
     const markers = computeExtendedMarkers(units28, hrMax, ftp, ctl, atl);
     const scores = computeFitnessScores(markers);
-
     const phase = recommendWeekPhaseV2(scores, weekState);
     const emoji = stateEmoji(weekState);
 
-    // Progression für neues Wochenziel
-    let multiplier = 1.0;
-    if (weekState === "Müde") multiplier = 0.8;
-    else if (ramp < 0.5) multiplier = weekState === "Erholt" ? 1.12 : 1.08;
-    else if (ramp < 1.0) multiplier = weekState === "Erholt" ? 1.08 : 1.05;
-    else if (ramp <= 1.5) multiplier = 1.02;
-    else multiplier = 0.9;
+    let mult = 1.0;
+    if (weekState === "Müde") mult = 0.8;
+    else if (ramp < 0.5) mult = weekState === "Erholt" ? 1.12 : 1.08;
+    else if (ramp < 1.0) mult = weekState === "Erholt" ? 1.08 : 1.05;
+    else if (ramp <= 1.5) mult = 1.02;
+    else mult = 0.9;
 
-    let nextTarget = prevTarget * multiplier;
+    let nextTarget = prevTarget * mult;
     nextTarget = Math.max(prevTarget * 0.75, Math.min(prevTarget * 1.25, nextTarget));
     nextTarget = Math.round(nextTarget / 5) * 5;
 
-    // Datum für nächste Woche
     const mondayFuture = new Date(mondayDate);
     mondayFuture.setUTCDate(mondayFuture.getUTCDate() + 7 * w);
     const mondayId = mondayFuture.toISOString().slice(0, 10);
 
-    // Text für Intervals
     const payload = {
       id: mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
@@ -360,11 +289,10 @@ Anaerob: ${scores.anaerobic} (PDC ${(markers.pdc*100).toFixed(0)}%)
 Polarisation: ${scores.polarisation} (${(markers.polarisationIndex*100).toFixed(0)}% Z1/Z2)
 Workload (ACWR): ${scores.workload} (${markers.acwr?.toFixed(2)})
 
-Empfohlene Wochenphase: ${phase}
+Empfohlene Phase: ${phase}
 `
     };
 
-    // Update in Intervals
     try {
       const res = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`, {
         method: "PUT",
@@ -372,12 +300,11 @@ Empfohlene Wochenphase: ${phase}
         body: JSON.stringify(payload)
       });
 
-      if (!res.ok) console.error("Update error", await res.text());
+      if (!res.ok) console.error("Update error:", await res.text());
     } catch (e) {
-      console.error("Exception updating future week:", e);
+      console.error("Exception updating week:", e);
     }
 
-    // Speichern
     progression.push({
       weekOffset: w,
       monday: mondayId,
@@ -394,14 +321,13 @@ Empfohlene Wochenphase: ${phase}
   return progression;
 }
 
-
 //----------------------------------------------------------
-// MAIN: holt Wellness, lädt 28-Tage Aktivitäten, simuliert 6 Wochen
+// MAIN HANDLER
 //----------------------------------------------------------
 async function handle(env) {
   try {
-    const athleteId = INTERVALS_ATHLETE_ID;
     const apiKey = INTERVALS_API_KEY;
+    const athleteId = INTERVALS_ATHLETE_ID;
     const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
 
     const now = new Date();
@@ -416,7 +342,7 @@ async function handle(env) {
 
     const mondayStr = mondayDate.toISOString().slice(0, 10);
 
-    // Wellness der aktuellen Woche
+    // Wellness
     const wRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`, {
       headers: { Authorization: authHeader }
     });
@@ -429,20 +355,17 @@ async function handle(env) {
     const { state: weekState } = classifyWeek(ctl, atl, ramp);
 
     const dailyTarget = computeDailyTarget(ctl, atl);
-
-    const planSelected = parseTrainingDays(
-      wellness[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING
-    );
+    const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING);
 
     const hrMax = wellness.hrMax ?? 173;
     const ftp = wellness.ftp ?? 250;
 
-    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD] ??
-      Math.round(dailyTarget * 7);
+    const weeklyTargetStart =
+      wellness[WEEKLY_TARGET_FIELD] ?? Math.round(dailyTarget * 7);
 
-    // -------------------------------------------------------
-    // WICHTIG: 28-Tage Aktivitäten laden
-    // -------------------------------------------------------
+    // ------------------------------
+    // 28-Tage Aktivitäten laden
+    // ------------------------------
     const start28 = new Date(mondayDate);
     start28.setUTCDate(start28.getUTCDate() - 28);
     const startStr = start28.toISOString().slice(0, 10);
@@ -459,9 +382,9 @@ async function handle(env) {
     const actJson = await actRes.json();
     const units28 = actJson.activities ?? actJson.data ?? [];
 
-    // -------------------------------------------------------
-    // Simulation auf Basis 28-Tage Marker
-    // -------------------------------------------------------
+    // ------------------------------
+    // Simulation
+    // ------------------------------
     const progression = await simulateWeeks(
       ctl, atl, weekState, weeklyTargetStart,
       mondayDate, planSelected,
@@ -470,7 +393,6 @@ async function handle(env) {
       6
     );
 
-    // JSON-Ausgabe
     return new Response(JSON.stringify({
       dryRun: true,
       thisWeek: {
@@ -485,9 +407,8 @@ async function handle(env) {
   }
 }
 
-
 //----------------------------------------------------------
-// EXPORT (ESSENTIELL FÜR CLOUDFLARE!)
+// EXPORT (ESSENTIELL!)
 //----------------------------------------------------------
 export default {
   async fetch(request, env, ctx) {
