@@ -9,12 +9,11 @@ const ATHLETE_ID = "i105857";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 
 //----------------------------------------------------------
-// CTL-/ATL-Logik (0.8–1.3 CTL/Woche + Deload)
+// CTL-/ATL-Logik (0.8 CTL/Woche + Deload)
 //----------------------------------------------------------
 
-// Ziel-Steigerungen pro Woche
-const CTL_DELTA_MIN = 0.8;
-const CTL_DELTA_MAX = 1.3;
+// Ziel-Steigerung pro Woche: fixe Rampe +0.8 CTL/Woche
+const CTL_DELTA_TARGET = 0.8;
 
 // ACWR-Bereiche
 // 0.8–1.3  = ideal
@@ -27,32 +26,23 @@ const ACWR_HARD_MAX = 1.5;
 const DELOAD_FACTOR = 0.9;
 
 /**
- * Liefert ATL-Grenzen in Abhängigkeit von CTL.
- * abgeleitet aus deiner Tabelle.
+ * ATL-Bänder in Abhängigkeit vom CTL (deine Tabelle)
+ *
+ * Einsteiger / Wiedereinsteiger / CTL < 30   -> ATL 25–45
+ * Fortgeschritten / CTL 30–60               -> ATL 40–70
+ * Ambitioniert / CTL 60–90                  -> ATL 60–95
+ * Sehr fit / CTL 90–130                     -> ATL 80–140
  */
-function getAtlThresholds(ctl) {
-  let softMaxAtl;
-  let hardMaxAtl;
-
+function getAtlBand(ctl) {
   if (ctl < 30) {
-    // Einsteiger / Wiedereinsteiger
-    softMaxAtl = Math.min(35, ctl + 10); // sicherer Deckel
-    hardMaxAtl = Math.min(40, ctl + 15); // kurzzeitige Peaks
+    return { minAtl: 25, maxAtl: 45 };
   } else if (ctl < 60) {
-    // Fortgeschrittene
-    softMaxAtl = Math.min(70, ctl + 15);
-    hardMaxAtl = Math.min(80, ctl + 20);
+    return { minAtl: 40, maxAtl: 70 };
   } else if (ctl < 90) {
-    // Ambitioniert
-    softMaxAtl = Math.min(95, ctl + 20);
-    hardMaxAtl = Math.min(110, ctl + 25);
+    return { minAtl: 60, maxAtl: 95 };
   } else {
-    // Sehr fit
-    softMaxAtl = Math.min(140, ctl + 25);
-    hardMaxAtl = 140;
+    return { minAtl: 80, maxAtl: 140 };
   }
-
-  return { softMaxAtl, hardMaxAtl };
 }
 
 /**
@@ -60,18 +50,23 @@ function getAtlThresholds(ctl) {
  *
  * Kriterien:
  *  1) ACWR >= 1.5  → immer Deload
- *  2) ATL > hardMaxAtl → Deload
- *  3) ACWR > 1.3 UND ATL > softMaxAtl → Deload
+ *  2) ATL > maxAtl (aus Band-Tabelle) → Deload
  */
 function shouldDeload(ctl, atl) {
   if (ctl <= 0) return false;
 
   const acwr = atl / ctl;
-  const { softMaxAtl, hardMaxAtl } = getAtlThresholds(ctl);
+  const { maxAtl } = getAtlBand(ctl);
 
-  if (acwr >= ACWR_HARD_MAX) return true;
-  if (atl >= hardMaxAtl) return true;
-  if (acwr > ACWR_SOFT_MAX && atl > softMaxAtl) return true;
+  // 1) Extremfall: ACWR sehr hoch
+  if (acwr >= ACWR_HARD_MAX) {
+    return true;
+  }
+
+  // 2) ATL über oberem Band → absolut zu hoch
+  if (atl > maxAtl) {
+    return true;
+  }
 
   return false;
 }
@@ -83,7 +78,7 @@ function shouldDeload(ctl, atl) {
  *   => d_max = ((ACWR_SOFT_MAX - 1) / (6 - ACWR_SOFT_MAX)) * CTL
  */
 function maxSafeCtlDelta(ctl) {
-  if (ctl <= 0) return CTL_DELTA_MIN;
+  if (ctl <= 0) return CTL_DELTA_TARGET;
   const numerator = (ACWR_SOFT_MAX - 1) * ctl;
   const denominator = 6 - ACWR_SOFT_MAX;
   return numerator / denominator;
@@ -140,24 +135,26 @@ function computeDeloadWeek(ctl, atl) {
 
 /**
  * Berechnet NUR die nächste Woche auf Basis des aktuellen CTL/ATL.
+ * - Standardziel: +0.8 CTL/Woche
+ * - begrenzt durch ACWR-Safety
+ * - bei zu hohem ACWR oder ATL (absolut) → Deload
  */
 function calcNextWeekTarget(ctl, atl) {
+  // 1) Deload-Check
   if (shouldDeload(ctl, atl)) {
     return computeDeloadWeek(ctl, atl);
   }
 
+  // 2) Aufbauwoche mit Zielrampe 0.8, begrenzt durch ACWR
   const dMaxSafe = maxSafeCtlDelta(ctl);
+  let targetDelta = CTL_DELTA_TARGET;
 
-  let targetDelta = Math.min(CTL_DELTA_MAX, dMaxSafe);
-
-  if (dMaxSafe < CTL_DELTA_MIN) {
+  if (!isFinite(dMaxSafe) || dMaxSafe <= 0) {
+    // ACWR lässt keine Steigerung zu → Erhaltungswoche
+    targetDelta = 0;
+  } else if (dMaxSafe < targetDelta) {
+    // ACWR würde bei 0.8 zu hoch → auf sicheres Maximum begrenzen
     targetDelta = dMaxSafe;
-  } else if (targetDelta < CTL_DELTA_MIN) {
-    targetDelta = CTL_DELTA_MIN;
-  }
-
-  if (!isFinite(targetDelta) || targetDelta <= 0) {
-    targetDelta = 0; // Erhaltungswoche
   }
 
   return computeWeekFromCtlDelta(ctl, atl, targetDelta);
@@ -166,8 +163,6 @@ function calcNextWeekTarget(ctl, atl) {
 /**
  * Simuliert die folgenden Wochen NACH dieser Woche.
  * week0 = Ergebnis von calcNextWeekTarget() für die aktuelle Woche.
- *
- * progression[0] = nächste Woche (Montag + 7 Tage)
  */
 function simulateFutureWeeks(ctlStart, atlStart, mondayDate, weeks, week0) {
   const progression = [];
@@ -179,7 +174,6 @@ function simulateFutureWeeks(ctlStart, atlStart, mondayDate, weeks, week0) {
   for (let w = 1; w <= weeks; w++) {
     const weekResult = calcNextWeekTarget(ctl, atl);
 
-    // Montag dieser Zukunftswoche (ab nächster Woche)
     const future = new Date(mondayDate);
     future.setUTCDate(future.getUTCDate() + 7 * w);
     const mondayStr = future.toISOString().slice(0, 10);
@@ -236,7 +230,7 @@ async function handle(dryRun = true) {
     const ctl = well.ctl ?? 0;
     const atl = well.atl ?? 0;
 
-    // Diese Woche berechnen (BUILD / MAINTAIN / DELOAD)
+    // Diese Woche berechnen
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
 
@@ -306,10 +300,11 @@ async function handle(dryRun = true) {
 //----------------------------------------------------------
 export default {
   async fetch(request, env, ctx) {
-    return handle(true);  // nur berechnen, nichts schreiben
+    // Nur anschauen (dryRun = true)
+    return handle(true);
   },
   async scheduled(event, env, ctx) {
-    // in Cloudflare Cron z.B. "Montag 06:00"
-    ctx.waitUntil(handle(false)); // berechnen + WochenzielTSS setzen
+    // Cron z.B. jeden Montag → berechnet + schreibt WochenzielTSS
+    ctx.waitUntil(handle(false));
   }
 };
