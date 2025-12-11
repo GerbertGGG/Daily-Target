@@ -416,7 +416,7 @@ const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
 
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
-    const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
+   
 
     if (!dryRun) {
       const body = {
