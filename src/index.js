@@ -196,9 +196,8 @@ function simulateFutureWeeks(ctlStart, atlStart, mondayDate, weeks, week0) {
 }
 
 //----------------------------------------------------------
-// DECOUPLING / GRUNDLAGE-ANALYSE über 28 Tage
+// Hilfsfunktionen allgemein
 //----------------------------------------------------------
-
 function median(values) {
   if (!values || values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -209,22 +208,24 @@ function median(values) {
   return sorted[mid];
 }
 
-/**
- * GA-Filter:
- * - HF-Daten vorhanden
- * - HFmax der Einheit ≤ 85 % der globalen HFmax
- * - Dauer:
- *    - Run ≥ 45 min
- *    - Ride ≥ 60 min
- *    - sonst ≥ 45 min
- */
-function isGaSession(a, hrMaxGlobal) {
-  if (!hrMaxGlobal || hrMaxGlobal <= 0) return false;
+//----------------------------------------------------------
+// RUN-DECOUPLING (Pa:Hr) für Phasenlogik
+//----------------------------------------------------------
 
+/**
+ * Prüft, ob eine Einheit ein GA-Run für Decoupling ist:
+ * - type === "Run"
+ * - Dauer >= 45 min
+ * - HRavg ca. 70–78 % HFmax
+ * - HRmax <= 85 % HFmax
+ * - Name nicht offensichtlich HIT/Intervall
+ */
+function isGaRunForDecoupling(a, hrMaxGlobal) {
   const type = (a.type || "").toLowerCase();
+  if (!type.includes("run")) return false;
+
   const hrAvg = a.average_heartrate ?? null;
   const hrMax = a.max_heartrate ?? null;
-
   if (!hrAvg || !hrMax) return false;
 
   const durationSec =
@@ -232,70 +233,105 @@ function isGaSession(a, hrMaxGlobal) {
     a.elapsed_time ??
     a.icu_recording_time ??
     0;
+  if (!durationSec || durationSec < 45 * 60) return false; // mind. 45 min
 
-  if (!durationSec || durationSec <= 0) return false;
+  const athleteMax = a.athlete_max_hr ?? hrMaxGlobal ?? null;
+  if (!athleteMax || athleteMax <= 0) return false;
 
-  let minDuration = 45 * 60; // default 45 min
-  if (type.includes("ride")) minDuration = 60 * 60; // Rad eher 60 min
+  const relAvg = hrAvg / athleteMax;
+  const relMax = hrMax / athleteMax;
 
-  if (durationSec < minDuration) return false;
+  // Ziel: knapp unter LT1 / Zone2 → ca. 70–78 % HFmax
+  if (relAvg < 0.70 || relAvg > 0.78) return false;
 
-  const hfMaxLimit = 0.85 * hrMaxGlobal;
-  if (hrMax > hfMaxLimit) return false;
+  // Keine Peaks tief in den Schwellen-/VO2-Bereich
+  if (relMax > 0.85) return false;
+
+  const name = (a.name || "").toLowerCase();
+  if (/hit|intervall|interval|schwelle|vo2|max|berg|30s|30\/15|15\/15/i.test(name)) {
+    return false;
+  }
 
   return true;
 }
 
 /**
- * Holt aus 28 Tagen die GA-Einheiten und ihre Decoupling-Werte (icu_cardiac_drift).
+ * Holt den Pa:Hr-Decoupling-Wert für Lauf:
+ * - pahr_decoupling (Hauptfeld)
+ * - evtl. pa_hr_decoupling als Fallback
+ * Rückgabe als Bruchteil (0.05 = 5%).
  */
-function extractGaDecouplingStats(activities, hrMaxGlobal) {
-  const decouplings = [];
+function findRunDecoupling(a) {
+  const candidates = [
+    "pahr_decoupling",
+    "pa_hr_decoupling"
+  ];
 
-  for (const a of activities) {
-    if (!isGaSession(a, hrMaxGlobal)) continue;
-
-    const driftRaw =
-      typeof a.icu_cardiac_drift === "number"
-        ? a.icu_cardiac_drift
-        : (typeof a.cardiac_drift === "number"
-            ? a.cardiac_drift
-            : null);
-
-    if (driftRaw == null || !isFinite(driftRaw)) continue;
-
-    const drift = Math.abs(driftRaw);
-    decouplings.push(drift);
+  for (const key of candidates) {
+    const v = a[key];
+    if (typeof v === "number" && isFinite(v)) {
+      let abs = Math.abs(v);
+      // Intervals kann 5.3 für 5.3% liefern → in Bruchteil umwandeln
+      if (abs > 1) abs = abs / 100;
+      return abs;
+    }
   }
 
-  const med = median(decouplings);
+  return null;
+}
+
+/**
+ * Run-Decoupling-Stats für die letzten 28 Tage:
+ * - medianDrift: Median über alle GA-Run-Drifts
+ * - count: Anzahl Runs mit Drift
+ * - gaCount: Anzahl GA-Runs (nach Filter)
+ * - gaWithDrift: Anzahl GA-Runs mit gültigem Drift
+ */
+function extractRunDecouplingStats(activities, hrMaxGlobal) {
+  const drifts = [];
+  let gaCount = 0;
+  let gaWithDrift = 0;
+
+  for (const a of activities) {
+    if (!isGaRunForDecoupling(a, hrMaxGlobal)) continue;
+    gaCount++;
+
+    const drift = findRunDecoupling(a);
+    if (drift == null) continue;
+
+    gaWithDrift++;
+    drifts.push(drift);
+  }
+
+  const med = median(drifts);
+
   return {
-    medianDecoupling: med,
-    count: decouplings.length
+    medianDrift: med,
+    count: drifts.length,
+    gaCount,
+    gaWithDrift
   };
 }
 
 /**
- * Phase aus Decoupling ableiten:
+ * Phase aus Run-Decoupling ableiten:
  *
- * < 5 %   -> "Spezifisch"
- * 5–8 %   -> "Aufbau"
- * >= 8 %  -> "Grundlage"
+ * medianDrift > 7%   -> "Grundlage"
+ * 4–7%               -> "Aufbau"
+ * < 4%               -> "Spezifisch"
  *
  * Keine Daten -> konservativ "Grundlage".
  */
-function decidePhaseFromDecoupling(medianDecoupling) {
-  if (medianDecoupling == null) {
+function decidePhaseFromRunDecoupling(medianDrift) {
+  if (medianDrift == null) return "Grundlage";
+
+  if (medianDrift > 0.07) {
     return "Grundlage";
   }
-
-  if (medianDecoupling < 0.05) {
-    return "Spezifisch";
-  }
-  if (medianDecoupling < 0.08) {
+  if (medianDrift > 0.04) {
     return "Aufbau";
   }
-  return "Grundlage";
+  return "Spezifisch";
 }
 
 //----------------------------------------------------------
@@ -331,7 +367,7 @@ async function handle(dryRun = true) {
 
     const ctl = well.ctl ?? 0;
     const atl = well.atl ?? 0;
-    const hrMaxGlobal = well.hrMax ?? 173;
+    const hrMaxGlobal = well.hrMax ?? well.max_hr ?? 173;
 
     // Activities der letzten 28 Tage holen (für Decoupling)
     const start28 = new Date(monday);
@@ -357,9 +393,9 @@ async function handle(dryRun = true) {
       console.error("Activities fetch failed", actRes.status, actRes.statusText);
     }
 
-    // Decoupling über GA-Sessions auswerten
-    const decStats = extractGaDecouplingStats(activities, hrMaxGlobal);
-    const phase = decidePhaseFromDecoupling(decStats.medianDecoupling);
+    // Run-Decoupling-Stats aus 28 Tagen
+    const decStats = extractRunDecouplingStats(activities, hrMaxGlobal);
+    const phase = decidePhaseFromRunDecoupling(decStats.medianDrift);
 
     // Diese Woche berechnen (TSS-Ziel)
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
@@ -418,7 +454,14 @@ async function handle(dryRun = true) {
             ctlDelta: thisWeekPlan.ctlDelta,
             acwr: thisWeekPlan.acwr,
             phase,                             // Grundlage | Aufbau | Spezifisch
-            decoupling: decStats
+            runDecoupling: {
+              ...decStats,
+              // zur Kontrolle: Median als Prozent
+              medianDriftPercent: decStats.medianDrift != null
+                ? decStats.medianDrift * 100
+                : null,
+              totalActivities: activities.length
+            }
           },
           progression
         },
@@ -446,4 +489,3 @@ export default {
     ctx.waitUntil(handle(false)); // berechnet & schreibt WochenzielTSS + Phase
   }
 };
-
