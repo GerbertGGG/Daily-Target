@@ -11,6 +11,8 @@ const ACWR_SOFT_MAX = 1.3;
 const ACWR_HARD_MAX = 1.5;
 const DELOAD_FACTOR = 0.9;
 
+// ---------------- CTL / ATL / ACWR ----------------
+
 function getAtlMax(ctl) {
   if (ctl < 30) return 30;
   if (ctl < 60) return 45;
@@ -98,6 +100,8 @@ function median(values) {
   return sorted[mid];
 }
 
+// ---------------- GA-Filter & Decoupling ----------------
+
 function isGaRunForDecoupling(a, hrMaxGlobal, debug) {
   const type = (a.type || "").toLowerCase();
   const entry = {
@@ -111,11 +115,13 @@ function isGaRunForDecoupling(a, hrMaxGlobal, debug) {
     isGA: false,
     reason: []
   };
+
   if (!type.includes("run")) {
     entry.reason.push("not_run");
     debug.gaChecks.push(entry);
     return false;
   }
+
   const duration = a.moving_time ?? a.elapsed_time ?? a.icu_recording_time ?? 0;
   entry.duration = duration;
   if (!duration || duration < 40 * 60) {
@@ -123,12 +129,14 @@ function isGaRunForDecoupling(a, hrMaxGlobal, debug) {
     debug.gaChecks.push(entry);
     return false;
   }
+
   const athleteMax = a.athlete_max_hr ?? hrMaxGlobal ?? null;
   if (!athleteMax || athleteMax <= 0) {
     entry.reason.push("no_hr_max");
     debug.gaChecks.push(entry);
     return false;
   }
+
   const hrAvg = a.average_heartrate ?? null;
   const hrMax = a.max_heartrate ?? null;
   if (!hrAvg || !hrMax) {
@@ -136,26 +144,31 @@ function isGaRunForDecoupling(a, hrMaxGlobal, debug) {
     debug.gaChecks.push(entry);
     return false;
   }
+
   const relAvg = hrAvg / athleteMax;
   const relMax = hrMax / athleteMax;
   entry.relAvg = relAvg;
   entry.relMax = relMax;
+
   if (relAvg < 0.70 || relAvg > 0.82) {
     entry.reason.push("hr_avg_outside_70_82");
     debug.gaChecks.push(entry);
     return false;
   }
+
   if (relMax > 0.95) {
     entry.reason.push("hr_max>95%");
     debug.gaChecks.push(entry);
     return false;
   }
+
   const name = (a.name || "").toLowerCase();
   if (/hit|intervall|interval|schwelle|vo2|max|berg|30s|30\/15|15\/15/i.test(name)) {
     entry.reason.push("name_intense");
     debug.gaChecks.push(entry);
     return false;
   }
+
   entry.isGA = true;
   entry.reason.push("GA_ok");
   debug.gaChecks.push(entry);
@@ -175,69 +188,89 @@ function extractActivityDecoupling(a) {
   return null;
 }
 
+function computePaHrDecoupling(time, hr, velocity) {
+  if (!time || !hr || !velocity) return null;
+  const n = Math.min(time.length, hr.length, velocity.length);
+  if (n < 100) return null;
+
+  const pacePerHr = [];
+  for (let i = 0; i < n; i++) {
+    const v = Math.max(velocity[i] ?? 0, 0.5);
+    const h = Math.max(hr[i] ?? 0, 40);
+    pacePerHr.push(v / h);
+  }
+
+  const mid = Math.floor(pacePerHr.length / 2);
+  if (mid < 10 || pacePerHr.length - mid < 10) return null;
+
+  let sum1 = 0, sum2 = 0;
+  for (let i = 0; i < pacePerHr.length; i++) {
+    if (i < mid) sum1 += pacePerHr[i];
+    else sum2 += pacePerHr[i];
+  }
+
+  const avg1 = sum1 / mid;
+  const avg2 = sum2 / (pacePerHr.length - mid);
+  if (!isFinite(avg1) || avg1 <= 0) return null;
+
+  const drift = (avg2 - avg1) / avg1;
+  return Math.abs(drift);
+}
+
 async function computeDriftFromStream(activityId, authHeader, debug) {
   try {
-    const res = await fetch(
-      `${BASE_URL}/activity/${activityId}/stream?types=time,heartrate,velocity_smooth`,
-      { headers: { Authorization: authHeader } }
-    );
-    const entry = { id: activityId, ok: res.ok, lenTime: null, lenHr: null, lenVel: null, used: false, error: null };
+    const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
+    const res = await fetch(url, { headers: { Authorization: authHeader } });
+
+    const entry = {
+      id: activityId,
+      ok: res.ok,
+      lenTime: null,
+      lenHr: null,
+      lenVel: null,
+      used: false,
+      error: null
+    };
+
     if (!res.ok) {
       entry.error = `http_${res.status}`;
       debug.streamChecks.push(entry);
       return null;
     }
-    const data = await res.json();
-    const time = Array.isArray(data.time) ? data.time : [];
-    const hr = Array.isArray(data.heartrate) ? data.heartrate : [];
-    const vel = Array.isArray(data.velocity_smooth) ? data.velocity_smooth : [];
-    entry.lenTime = time.length;
-    entry.lenHr = hr.length;
-    entry.lenVel = vel.length;
-    const n = Math.min(time.length, hr.length, vel.length);
-    if (n < 600) {
-      entry.error = "too_few_samples";
+
+    const streams = await res.json();
+    const getStream = (type) => {
+      const s = Array.isArray(streams)
+        ? streams.find(st => st.type === type)
+        : null;
+      return s && Array.isArray(s.data) ? s.data : null;
+    };
+
+    const time = getStream("time");
+    const hr = getStream("heartrate");
+    const vel = getStream("velocity_smooth");
+
+    entry.lenTime = time ? time.length : null;
+    entry.lenHr = hr ? hr.length : null;
+    entry.lenVel = vel ? vel.length : null;
+
+    const drift = computePaHrDecoupling(time, hr, vel);
+    if (drift == null) {
+      entry.error = "drift_null";
       debug.streamChecks.push(entry);
       return null;
     }
-    const mid = Math.floor(n / 2);
-    let sum1 = 0, sum2 = 0, c1 = 0, c2 = 0;
-    for (let i = 0; i < n; i++) {
-      const v = Math.max(vel[i] ?? 0, 0.5);
-      const h = Math.max(hr[i] ?? 0, 40);
-      const r = v / h;
-      if (i < mid) {
-        sum1 += r;
-        c1++;
-      } else {
-        sum2 += r;
-        c2++;
-      }
-    }
-    if (!c1 || !c2) {
-      entry.error = "no_halves";
-      debug.streamChecks.push(entry);
-      return null;
-    }
-    const avg1 = sum1 / c1;
-    const avg2 = sum2 / c2;
-    if (!isFinite(avg1) || !isFinite(avg2) || avg1 === 0) {
-      entry.error = "invalid_avgs";
-      debug.streamChecks.push(entry);
-      return null;
-    }
-    const raw = (avg2 - avg1) / avg1;
-    const drift = Math.abs(raw);
+
     entry.used = true;
     debug.streamChecks.push(entry);
+
     debug.driftComputations.push({
       id: activityId,
       source: "stream",
-      avg1,
-      avg2,
       drift,
       driftPercent: drift * 100
     });
+
     return drift;
   } catch (e) {
     debug.streamChecks.push({
@@ -257,9 +290,11 @@ async function extractRunDecouplingStats(activities, hrMaxGlobal, authHeader, de
   const drifts = [];
   let gaCount = 0;
   let gaWithDrift = 0;
+
   for (const a of activities) {
     if (!isGaRunForDecoupling(a, hrMaxGlobal, debug)) continue;
     gaCount++;
+
     let drift = extractActivityDecoupling(a);
     if (drift != null) {
       gaWithDrift++;
@@ -272,12 +307,14 @@ async function extractRunDecouplingStats(activities, hrMaxGlobal, authHeader, de
       });
       continue;
     }
+
     drift = await computeDriftFromStream(a.id, authHeader, debug);
     if (drift != null) {
       gaWithDrift++;
       drifts.push(drift);
     }
   }
+
   const med = median(drifts);
   return {
     medianDrift: med,
@@ -293,6 +330,8 @@ function decidePhaseFromRunDecoupling(medianDrift) {
   if (medianDrift > 0.04) return "Aufbau";
   return "Spezifisch";
 }
+
+// ---------------- MAIN ----------------
 
 async function handle(dryRun = true) {
   try {
@@ -321,6 +360,7 @@ async function handle(dryRun = true) {
     const start28 = new Date(monday);
     start28.setUTCDate(start28.getUTCDate() - 28);
     const start28Str = start28.toISOString().slice(0, 10);
+
     const actRes = await fetch(
       `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start28Str}&newest=${today}`,
       { headers: { Authorization: authHeader } }
@@ -335,7 +375,11 @@ async function handle(dryRun = true) {
 
     const decStats = await extractRunDecouplingStats(activities, hrMaxGlobal, authHeader, debug);
     const phase = decidePhaseFromRunDecoupling(decStats.medianDrift);
-    debug.phaseReason = `medianDrift=${decStats.medianDrift ?? "null"} -> phase=${phase}`;
+
+    debug.phaseReason =
+      decStats.medianDrift == null
+        ? "medianDrift=null -> phase=Grundlage"
+        : `medianDrift=${(decStats.medianDrift * 100).toFixed(2)}% -> phase=${phase}`;
 
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
@@ -377,13 +421,15 @@ async function handle(dryRun = true) {
         phase,
         runDecoupling: {
           ...decStats,
-          medianDriftPercent: decStats.medianDrift != null ? decStats.medianDrift * 100 : null,
+          medianDriftPercent:
+            decStats.medianDrift != null ? decStats.medianDrift * 100 : null,
           totalActivities: activities.length
         }
       },
       progression,
       debug
     };
+
     return new Response(JSON.stringify(result, null, 2), { status: 200 });
   } catch (err) {
     return new Response("Error: " + err, { status: 500 });
@@ -392,9 +438,9 @@ async function handle(dryRun = true) {
 
 export default {
   async fetch(request, env, ctx) {
-    return handle(true);   // HTTP = immer dryRun
+    return handle(true); // HTTP = nur anschauen
   },
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handle(false)); // Cron = schreibt WochenzielTSS + Phase
+    ctx.waitUntil(handle(false)); // Cron = schreiben
   }
 };
