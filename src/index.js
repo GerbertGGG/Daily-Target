@@ -220,34 +220,7 @@ function findRunDecoupling(a) {
 // Extract Statistics
 //----------------------------------------------------------
 
-async function extractRunDecouplingStats(activities, hrMax, authHeader) {
-  const drifts = [];
-  let gaCount = 0;
-  let gaWithDrift = 0;
-
-  for (const a of activities) {
-    if (!isGaRunForDecoupling(a, hrMax)) continue;
-    gaCount++;
-
-    let drift = findRunDecoupling(a);
-    if (drift == null) {
-      drift = await computeDecouplingFromStreams(a.id, authHeader);
-    }
-
-    if (drift == null || !isFinite(drift)) continue;
-
-    gaWithDrift++;
-    drifts.push(drift);
-  }
-
-  return {
-    medianDrift: median(drifts),
-    count: drifts.length,
-    gaCount,
-    gaWithDrift
-  };
-}
-
+extractRunDecouplingStats
 //----------------------------------------------------------
 // Phase Detection
 //----------------------------------------------------------
