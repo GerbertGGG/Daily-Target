@@ -4,7 +4,7 @@ const API_SECRET = "1xg1v04ym957jsqva8720oo01";
 const ATHLETE_ID = "i105857";
 
 // Feldnamen genau wie in Intervals
-const WEEKLY_TARGET_FIELD = "WochenzielTSS"; // <- richtig
+const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const PLAN_FIELD = "WochenPlan";
 const COMMENT_FIELD = "comments";
 
@@ -346,15 +346,18 @@ async function handle(dryRun = true) {
       decStats
     });
 
-    // Am Wochen-Montag schreiben (oder nur simulieren)
+    let futureWriteResults = [];
+
+    // Schreiben in Intervals
     if (!dryRun) {
-      const body = {
+      // 1) Aktueller Wochen-Montag mit Phase + Kommentar
+      const bodyCurrent = {
         [WEEKLY_TARGET_FIELD]: weeklyTargetTss,
         [PLAN_FIELD]: phase,
         [COMMENT_FIELD]: commentText
       };
 
-      const putRes = await fetch(
+      const putResCurrent = await fetch(
         `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`,
         {
           method: "PUT",
@@ -362,19 +365,19 @@ async function handle(dryRun = true) {
             Authorization: authHeader,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(bodyCurrent)
         }
       );
 
-      if (!putRes.ok) {
-        const putText = await putRes.text();
+      if (!putResCurrent.ok) {
+        const putText = await putResCurrent.text();
         return new Response(
           JSON.stringify(
             {
-              error: "Error updating wellness",
-              status: putRes.status,
+              error: "Error updating current week wellness",
+              status: putResCurrent.status,
               responseBody: putText,
-              requestBody: body,
+              requestBody: bodyCurrent,
               date: mondayStr
             },
             null,
@@ -382,6 +385,34 @@ async function handle(dryRun = true) {
           ),
           { status: 500 }
         );
+      }
+
+      // 2) Zukünftige Wochen (nur WochenzielTSS)
+      for (const wk of progression) {
+        const bodyFuture = {
+          [WEEKLY_TARGET_FIELD]: wk.weeklyTargetTss
+        };
+
+        const putResFuture = await fetch(
+          `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${wk.monday}`,
+          {
+            method: "PUT",
+            headers: {
+              Authorization: authHeader,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(bodyFuture)
+          }
+        );
+
+        const textFuture = await putResFuture.text().catch(() => "");
+        futureWriteResults.push({
+          date: wk.monday,
+          status: putResFuture.status,
+          ok: putResFuture.ok,
+          responseBody: textFuture || undefined,
+          requestBody: bodyFuture
+        });
       }
     }
 
@@ -406,7 +437,8 @@ async function handle(dryRun = true) {
           totalActivities: activities.length
         }
       },
-      progression
+      progression,
+      futureWriteResults: dryRun ? null : futureWriteResults
     };
 
     return new Response(JSON.stringify(result, null, 2), { status: 200 });
@@ -431,3 +463,4 @@ export default {
     ctx.waitUntil(handle(false));
   }
 };
+
