@@ -341,6 +341,12 @@ function fatOxEval(val) {
   if (val >= 0.6) return "⚠ Moderate";
   return "❌ Low";
 }
+function decidePhaseFromRunDecoupling(medianDrift) {
+  if (medianDrift == null) return "Grundlage";
+  if (medianDrift > 0.07) return "Grundlage";
+  if (medianDrift > 0.04) return "Aufbau";
+  return "Spezifisch";
+}
 
 function decidePhaseFromRunDecouplingAndFatOx(medianDrift, fatOx) {
   if (fatOx == null) return decidePhaseFromRunDecoupling(medianDrift);
