@@ -126,17 +126,22 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
   let ctl = ctlStart, atl = atlStart, prevTarget = weeklyTargetStart, prevState = weekStateStart;
   const weeklyProgression = [];
 
-  for(let w=1;w<=weeksToSim;w++){
+  for(let w=1; w<=weeksToSim; w++){
     const ctlAtWeekStart = ctl;
-    for(let d=0;d<7;d++){
+
+    // Tägliche Simulation der Woche
+    for(let d=0; d<7; d++){
       const share = dayWeights[d]/sumWeights;
-      const load = prevTarget*share;
+      const load = prevTarget * share;
       ctl = ctl + (load - ctl)/tauCtl;
       atl = atl + (load - atl)/tauAtl;
     }
+
     const ctlEnd = ctl, atlEnd = atl;
-    const rampSim = ctlEnd-ctlAtWeekStart;
+    const rampSim = ctlEnd - ctlAtWeekStart;
     const {state: simState} = classifyWeek(ctlEnd, atlEnd, rampSim);
+
+    // Ziel TSS für nächste Woche anpassen
     let nextTarget = prevTarget;
     if(simState==="Müde") nextTarget = prevTarget*0.8;
     else{
@@ -148,19 +153,29 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     nextTarget = Math.max(prevTarget*0.75,Math.min(prevTarget*1.25,nextTarget));
     nextTarget = Math.round(nextTarget/5)*5;
 
+    // Montag der zukünftigen Woche
     const mondayFutureDate = new Date(mondayDate);
-    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate()+7*w);
+    mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7*w);
     const mondayId = mondayFutureDate.toISOString().slice(0,10);
 
+    // Historische Marker für die letzte Woche
     const lastWeekMarkers = historicalMarkers[w-1] || {decupling:3,pdc:0.95, prevDecupling:3, prevPDC:0.95};
-    const phase = recommendWeekPhase(lastWeekMarkers, simState);
 
+    // --- DC/PDC-Schätzung für die Phase ---
+    const simDecoupling = lastWeekMarkers.decupling + 0.2 * rampSim;  // Alpha-Faktor leicht
+    const simPDC = lastWeekMarkers.pdc + 0.02 * rampSim;              // Beta-Faktor leicht
+    const estimatedMarkers = { ...lastWeekMarkers, decupling: simDecoupling, pdc: simPDC };
+
+    const phase = recommendWeekPhase(estimatedMarkers, simState);
+
+    // Briefing wie bisher
     const markers42d = historicalMarkers[Math.max(0,w-6)] || lastWeekMarkers;
     const markers90d = historicalMarkers[Math.max(0,w-13)] || lastWeekMarkers;
     const briefing = generateLongTermBriefing(mondayId, phase, simState, prevTarget, nextTarget, lastWeekMarkers, markers42d, markers90d, rampSim);
 
+    // Payload für Intervals
     const payloadFuture = {
-      id:mondayId,
+      id: mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
       [INTERVALS_PLAN_FIELD]: `Rest ${nextTarget} | ${stateEmoji(simState)} ${simState} | Phase: ${phase}`,
       comments: briefing
@@ -180,8 +195,10 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     prevState = simState;
     weeklyProgression.push({weekOffset:w, monday:mondayId, weeklyTarget:nextTarget, state:simState, phase:phase});
   }
+
   return weeklyProgression;
 }
+
 
 // ------------------- Hauptlogik -------------------
 async function handle(env){
