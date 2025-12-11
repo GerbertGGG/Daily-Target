@@ -33,14 +33,6 @@ function parseTrainingDays(str) {
 
 function stateEmoji(state){if(state==="Erholt")return "🔥"; if(state==="Müde")return "🧘"; return "⚖️";}
 
-function computeDailyTarget(ctl, atl){
-  const tsb = ctl - atl;
-  const tsbClamped = Math.max(-20, Math.min(20, tsb));
-  const base = 1.0; const k = 0.05;
-  const daily = ctl * (base + k*tsbClamped);
-  return Math.round(Math.max(0, Math.min(daily, ctl*1.5)));
-}
-
 function classifyWeek(ctl, atl, rampRate){
   const tsb = ctl - atl;
   let tsbCritical;
@@ -83,12 +75,12 @@ function recommendWeekPhase(lastWeekMarkers, weekState){
 }
 
 // ------------------- Wochen-TSS aus CTL-Ziel -------------------
-function computeWeeklyTssForCtlIncrease(ctlStart, atlStart, dayWeights, targetCtlIncrease, tauCtl, tauAtl){
+function computeWeeklyTssForCtlIncrease(ctlStart, dayWeights, targetCtlIncrease, tauCtl){
   const sumWeights = dayWeights.reduce((a,b)=>a+b,0);
   if(sumWeights===0) return 0;
-  // vereinfachte Näherung: Last pro Tag = gewünschte CTL-Steigerung * tauCtl / Anzahl gewichteter Tage
-  const avgDailyLoad = targetCtlIncrease * tauCtl / sumWeights;
-  return Math.round(avgDailyLoad * sumWeights);
+  // Näherung: avgDailyLoad = ctlStart + targetCtlIncrease * tauCtl / 7
+  const avgLoad = ctlStart + targetCtlIncrease * tauCtl / 7;
+  return Math.round(avgLoad * sumWeights);
 }
 
 // ------------------- 6-Wochen Simulation -------------------
@@ -116,12 +108,16 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const {state: simState} = classifyWeek(ctlEnd, atlEnd, rampSim);
 
     // Wochen-TSS dynamisch aus CTL-Ziel
-    const ctlTargetIncrease = (simState==="Müde") ? 0 : 1.0; // z.B. 1.0 pro Woche
+    let ctlTargetIncrease = 1.0; // Standard: 1.0 pro Woche
+    if(simState==="Normal" && ctl<100) ctlTargetIncrease = 1.0; // kann 0.8–1.3 hier dynamisch angepasst werden
+    if(simState==="Erholt") ctlTargetIncrease = 1.2;
+    if(simState==="Müde") ctlTargetIncrease = 0;
+
     let nextTarget;
     if(ctlTargetIncrease===0){
       nextTarget = Math.round(prevTarget * 0.9);
     } else {
-      nextTarget = computeWeeklyTssForCtlIncrease(ctl, atl, dayWeights, ctlTargetIncrease, tauCtl, tauAtl);
+      nextTarget = computeWeeklyTssForCtlIncrease(ctl, dayWeights, ctlTargetIncrease, tauCtl);
     }
 
     const mondayFutureDate = new Date(mondayDate);
@@ -217,10 +213,14 @@ async function handle(env){
       const estimatedMarkers = { ...historicalMarkers[historicalMarkers.length-1], decupling: simDecoupling, pdc: simPDC };
 
       const dayWeights = planSelected.map(v=>v?1:0);
-      if(weekState==="Müde"){
+      let ctlTargetIncrease = 1.0;
+      if(weekState==="Erholt") ctlTargetIncrease = 1.2;
+      if(weekState==="Müde") ctlTargetIncrease = 0;
+
+      if(ctlTargetIncrease===0){
         thisWeekTarget = Math.round(weeklyTargetStart*0.9);
       } else {
-        thisWeekTarget = computeWeeklyTssForCtlIncrease(ctl, atl, dayWeights, 1.0, 42, 7);
+        thisWeekTarget = computeWeeklyTssForCtlIncrease(ctl, dayWeights, ctlTargetIncrease, 42);
       }
 
       phaseNow = recommendWeekPhase(estimatedMarkers, weekState);
