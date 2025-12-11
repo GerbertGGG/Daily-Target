@@ -45,9 +45,12 @@ function getAtlMax(ctl) {
 }
 
 /**
- * Prüft, ob eine Entlastungswoche aufgrund Ermüdung nötig ist.
+ * Prüft, ob eine Deload-Woche nötig ist für ein gegebenes CTL/ATL-Paar.
  *
- * Kriterien (auf Basis der aktuellen Woche, nicht der simulierten):
+ * Kann sowohl für die aktuelle Woche (Ist-Zustand) als auch
+ * für die geplante nächste Woche (Simulationszustand) verwendet werden.
+ *
+ * Kriterien:
  *  1) ACWR >= 1.5  → immer Deload
  *  2) ATL > ATL-Max (aus Tabelle) → Deload
  */
@@ -134,10 +137,14 @@ function computeDeloadWeek(ctl, atl, refWeekTss) {
 /**
  * Plant EINE Woche:
  * - Ziel: +0.8 CTL/Woche, begrenzt durch ACWR
- * - Wenn aktuelle ATL/ACWR zu hoch → Deload mit 20% weniger TSS
+ * - Intelligente Deload-Entscheidung:
+ *   - Wenn aktuelles CTL/ATL "rot" ist → Deload
+ *   - ODER wenn die geplante Build-Woche zu einem "roten" CTL/ATL führen würde
+ *     (also ATL oder ACWR über Grenze) → Deload
+ * - Sonst Build-/Maintain-Woche mit Zielrampe.
  */
 function planWeek(ctl, atl) {
-  // Referenz-Aufbauwoche berechnen (ohne Deload-Check)
+  // 1) Referenz-Aufbauwoche berechnen (ohne Deload-Check)
   const dMaxSafe = maxSafeCtlDelta(ctl);
   let targetDelta = CTL_DELTA_TARGET;
 
@@ -149,15 +156,21 @@ function planWeek(ctl, atl) {
 
   const refBuildWeek = computeWeekFromCtlDelta(ctl, atl, targetDelta);
 
-  // Jetzt entscheiden, ob wir statt dessen deloaden
-  const fatigueDeload = shouldDeloadByFatigue(ctl, atl);
+  // 2) Deload-Check:
+  //    a) auf Basis des IST-Zustands
+  const fatigueDeloadNow = shouldDeloadByFatigue(ctl, atl);
+  //    b) auf Basis der geplanten Woche (Ziel-Zustand)
+  const fatigueDeloadFuture = shouldDeloadByFatigue(
+    refBuildWeek.nextCtl,
+    refBuildWeek.nextAtl
+  );
 
-  if (fatigueDeload) {
+  if (fatigueDeloadNow || fatigueDeloadFuture) {
     const deloadWeek = computeDeloadWeek(ctl, atl, refBuildWeek.weekTss);
     return deloadWeek;
   }
 
-  // Sonst normale Build-/Maintain-Woche
+  // 3) Sonst normale Build-/Maintain-Woche
   return refBuildWeek;
 }
 
@@ -237,7 +250,7 @@ async function handle(dryRun = true) {
     const ctl = well.ctl ?? 0;
     const atl = well.atl ?? 0;
 
-    // Diese Woche planen (intelligent: BUILD oder DELOAD)
+    // Diese Woche planen (intelligent: BUILD / DELOAD / MAINTAIN)
     const thisWeekPlan = planWeek(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
 
