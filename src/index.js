@@ -2,6 +2,7 @@ const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
+const INTERVALS_TARGET_FIELD = "TageszielTSS"; // <-- added: Tagesziel
 const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp";
@@ -61,7 +62,7 @@ function classifyWeek(ctl, atl, rampRate){
 // ------------------- Marker: Decoupling & PDC -------------------
 function computeMarkers(units){
   if(!Array.isArray(units)) return {decupling:null,pdc:null};
-  const gaUnits = units.filter(u=>u.type==="GA1"||u.type==="GA2");
+  const gaUnits = units.filter(u=>u.type===undefined?false:(u.type==="GA1"||u.type==="GA2"));
   if(gaUnits.length===0) return {decupling:null,pdc:null};
   const decupling = gaUnits.reduce((sum,u)=>sum+(u.hrDecoupling??0),0)/gaUnits.length;
   const pdc = gaUnits.reduce((sum,u)=>sum+(u.pdc??0),0)/gaUnits.length;
@@ -83,33 +84,34 @@ function recommendWeekPhase(lastWeekMarkers, weekState){
 
 // ------------------- Langzeit-Briefing -------------------
 function generateLongTermBriefing(mondayId, phase, simState, tssPrev, tssCurrent, lastWeekMarkers, markers42d, markers90d, rampSim){
-  const currentMarkers = lastWeekMarkers;
-  return `
-Woche: ${mondayId} | Phase: ${phase} | SimState: ${simState}
-------------------------------------------------
-Vergleich Vorwoche: 
-  TSS:        ${tssPrev} → ${tssCurrent}
-  Decoupling: ${lastWeekMarkers.prevDecupling?.toFixed(2)??"-"} → ${currentMarkers.decupling?.toFixed(2)??"-"}
-  PDC:        ${lastWeekMarkers.prevPDC?.toFixed(2)??"-"} → ${currentMarkers.pdc?.toFixed(2)??"-"}
+  const currentMarkers = lastWeekMarkers || {decupling:null,pdc:null, prevDecupling:null, prevPDC:null};
+  // safe values for percentage calcs
+  const safe42 = markers42d || {tss: tssPrev || tssCurrent || 0, decupling: currentMarkers.decupling||0, pdc: currentMarkers.pdc||0};
+  const safe90 = markers90d || {tss: tssPrev || tssCurrent || 0, decupling: currentMarkers.decupling||0, pdc: currentMarkers.pdc||0};
+  const pct42 = safe42.tss?(((tssCurrent - safe42.tss) / safe42.tss) * 100).toFixed(0):"0";
+  const pct90 = safe90.tss?(((tssCurrent - safe90.tss) / safe90.tss) * 100).toFixed(0):"0";
 
-Trend 42 Tage:
-  TSS:        ${((tssCurrent-markers42d.tss)/markers42d.tss*100).toFixed(0)}%
-  Decoupling: ${(currentMarkers.decupling-markers42d.decupling).toFixed(2)}
-  PDC:        ${(currentMarkers.pdc-markers42d.pdc).toFixed(2)}
-
-Trend 90 Tage:
-  TSS:        ${((tssCurrent-markers90d.tss)/markers90d.tss*100).toFixed(0)}%
-  Decoupling: ${(currentMarkers.decupling-markers90d.decupling).toFixed(2)}
-  PDC:        ${(currentMarkers.pdc-markers90d.pdc).toFixed(2)}
-
-------------------------------------------------
-Beurteilung:
-- Aerobe Basis: ${(currentMarkers.decupling<lastWeekMarkers.prevDecupling)?"verbessert":"stabil"}
-- Anaerobe Kapazität: ${(currentMarkers.pdc>lastWeekMarkers.prevPDC)?"gesteigert":"stabil"}
-- Müdigkeit: Ramp=${rampSim.toFixed(2)} → Belastung ${simState}
-Empfehlung:
-- Weiter ${phase}, GA1/GA2 für Stabilität, gezielte Intensivintervalle einbauen
-`;
+  return `Woche: ${mondayId} | Phase: ${phase} | SimState: ${simState}\n`+
+`------------------------------------------------\n`+
+`Vergleich Vorwoche: \n`+
+`  TSS:        ${tssPrev} → ${tssCurrent}\n`+
+`  Decoupling: ${lastWeekMarkers?.prevDecupling?.toFixed(2)??"-"} → ${currentMarkers.decupling?.toFixed(2)??"-"}\n`+
+`  PDC:        ${lastWeekMarkers?.prevPDC?.toFixed(2)??"-"} → ${currentMarkers.pdc?.toFixed(2)??"-"}\n\n`+
+`Trend 42 Tage:\n`+
+`  TSS:        ${pct42}%\n`+
+`  Decoupling: ${(currentMarkers.decupling - (safe42.decupling||0)).toFixed(2)}\n`+
+`  PDC:        ${(currentMarkers.pdc - (safe42.pdc||0)).toFixed(2)}\n\n`+
+`Trend 90 Tage:\n`+
+`  TSS:        ${pct90}%\n`+
+`  Decoupling: ${(currentMarkers.decupling - (safe90.decupling||0)).toFixed(2)}\n`+
+`  PDC:        ${(currentMarkers.pdc - (safe90.pdc||0)).toFixed(2)}\n\n`+
+`------------------------------------------------\n`+
+`Beurteilung:\n`+
+`- Aerobe Basis: ${((currentMarkers.decupling||0) < (lastWeekMarkers?.prevDecupling||0))?"verbessert":"stabil"}\n`+
+`- Anaerobe Kapazität: ${((currentMarkers.pdc||0) > (lastWeekMarkers?.prevPDC||0))?"gesteigert":"stabil"}\n`+
+`- Müdigkeit: Ramp=${rampSim.toFixed(2)} → Belastung ${simState}\n`+
+`Empfehlung:\n`+
+`- Weiter ${phase}, GA1/GA2 für Stabilität, gezielte Intensivintervalle einbauen\n`;
 }
 
 // ------------------- 6-Wochen Simulation -------------------
@@ -170,9 +172,9 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
         headers:{"Content-Type":"application/json", Authorization:authHeader},
         body:JSON.stringify(payloadFuture)
       });
-      if(!resFuture.ok){const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId,resFuture.status,txt);}
+      if(!resFuture.ok){const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId,resFuture.status,txt);} 
       else if(resFuture.body) resFuture.body.cancel?.();
-    }catch(e){console.error("Error updating future week:", e);}
+    }catch(e){console.error("Error updating future week:", e);} 
 
     prevTarget = nextTarget;
     prevState = simState;
@@ -203,22 +205,38 @@ async function handle(env){
     if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
     const {state: weekState, tsb} = classifyWeek(ctl, atl, rampRate);
     const dailyTargetBase = computeDailyTarget(ctl, atl);
+
+    // --- Schreibe Tagesziel (TageszielTSS) & aktuellen WochenPlan falls gewünscht ---
+    try{
+      const currentMarkers = computeMarkers(wellness.units??[]);
+      const phaseNow = recommendWeekPhase(currentMarkers, weekState);
+      const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+      const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`;
+
+      const payloadToday = {
+        id: today,
+        [INTERVALS_TARGET_FIELD]: Math.round(dailyTargetBase),
+        [INTERVALS_PLAN_FIELD]: dayPlanText
+      };
+
+      const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
+        method: "PUT",
+        headers: {"Content-Type": "application/json", Authorization: authHeader},
+        body: JSON.stringify(payloadToday)
+      });
+      if(!updateRes.ok){ const txt = await updateRes.text(); console.error("Failed to update today's wellness:", updateRes.status, txt); }
+      else { console.log("Updated today's Tagesziel and WochenPlan"); }
+    }catch(e){ console.error("Error writing today's target/plan:", e); }
+
     const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
     const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
     const historicalMarkers = wellness.historicalMarkers??[];
 
     const weeklyProgression = await simulatePlannedWeeks(ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers);
 
-    return new Response(JSON.stringify({
-      dryRun:true,
-      thisWeek:{monday:today, weeklyTarget:weeklyTargetStart, alreadyDone:0, remaining:weeklyTargetStart},
-      weeklyProgression
-    },null,2),{status:200});
+    return new Response(JSON.stringify({ dryRun:true, thisWeek:{monday:today, weeklyTarget:weeklyTargetStart, alreadyDone:0, remaining:weeklyTargetStart}, weeklyProgression },null,2),{status:200});
   }catch(err){console.error("Unexpected error:",err); return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});}
 }
 
 // ------------------- EXPORT -------------------
-export default {
-  async fetch(request, env, ctx){return handle(env);},
-  async scheduled(event, env, ctx){ctx.waitUntil(handle(env));}
-};
+export default { async fetch(request, env, ctx){return handle(env);}, async scheduled(event, env, ctx){ctx.waitUntil(handle(env));} };
