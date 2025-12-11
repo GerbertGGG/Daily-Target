@@ -188,11 +188,11 @@ function isGaRunForDecoupling(a, hrMaxGlobal) {
   const relAvg = hrAvg / athleteMax;
   const relMax = hrMax / athleteMax;
 
-  if (relAvg < 0.70 || relAvg > 0.78) return false;
-  if (relMax > 0.85) return false;
+  if (relAvg < 0.65 || relAvg > 0.80) return false;
+  
 
   const name = (a.name || "").toLowerCase();
-  if (/hit|intervall|interval|schwelle|vo2|max|berg|30s|30\/15|15\/15/i.test(name)) {
+  if (/hit|intervall|interval|schwelle|vo2|berg|30s|30\/15|15\/15/i.test(name)) {
     return false;
   }
 
