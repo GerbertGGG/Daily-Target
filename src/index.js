@@ -9,61 +9,58 @@ const ATHLETE_ID = "i105857";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 
 //----------------------------------------------------------
-// CTL-/ATL-Logik (0.8 CTL/Woche + Deload)
+// CTL-/ATL-Logik (0.8 CTL/Woche + intelligente Deloads)
 //----------------------------------------------------------
 
 // Ziel-Steigerung pro Woche: fixe Rampe +0.8 CTL/Woche
 const CTL_DELTA_TARGET = 0.8;
 
 // ACWR-Bereiche
-// 0.8–1.3  = ideal
+// 0.8–1.3  = ideal (für maxSafeCtlDelta)
 // 1.3–1.5  = erhöhtes Risiko
 // >1.5     = hochriskant, Deload
 const ACWR_SOFT_MAX = 1.3;
 const ACWR_HARD_MAX = 1.5;
 
-// Deload-Faktor: 90 % der Erhaltungsbelastung (~CTL)
-const DELOAD_FACTOR = 0.9;
-
 /**
- * ATL-Bänder in Abhängigkeit vom CTL (deine Tabelle)
+ * Absolute ATL-Obergrenze in Abhängigkeit vom CTL.
  *
- * Einsteiger / Wiedereinsteiger / CTL < 30   -> ATL 25–45
- * Fortgeschritten / CTL 30–60               -> ATL 40–70
- * Ambitioniert / CTL 60–90                  -> ATL 60–95
- * Sehr fit / CTL 90–130                     -> ATL 80–140
+ * Einsteiger / Wiedereinsteiger / CTL < 30   -> ATL max 30
+ * Fortgeschritten / CTL 30–60               -> ATL max 45
+ * Ambitioniert / CTL 60–90                  -> ATL max 60
+ * Sehr fit / CTL 90–130                     -> ATL max 80
  */
-function getAtlBand(ctl) {
+function getAtlMax(ctl) {
   if (ctl < 30) {
-    return { minAtl: 25, maxAtl: 45 };
+    return 30;
   } else if (ctl < 60) {
-    return { minAtl: 40, maxAtl: 70 };
+    return 45;
   } else if (ctl < 90) {
-    return { minAtl: 60, maxAtl: 95 };
+    return 60;
+  } else if (ctl < 130) {
+    return 80;
   } else {
-    return { minAtl: 80, maxAtl: 140 };
+    return 80;
   }
 }
 
 /**
- * Prüft, ob eine Entlastungswoche sinnvoll ist.
+ * Prüft, ob eine Entlastungswoche aufgrund Ermüdung nötig ist.
  *
- * Kriterien:
+ * Kriterien (auf Basis der aktuellen Woche, nicht der simulierten):
  *  1) ACWR >= 1.5  → immer Deload
- *  2) ATL > maxAtl (aus Band-Tabelle) → Deload
+ *  2) ATL > ATL-Max (aus Tabelle) → Deload
  */
-function shouldDeload(ctl, atl) {
+function shouldDeloadByFatigue(ctl, atl) {
   if (ctl <= 0) return false;
 
   const acwr = atl / ctl;
-  const { maxAtl } = getAtlBand(ctl);
+  const maxAtl = getAtlMax(ctl);
 
-  // 1) Extremfall: ACWR sehr hoch
   if (acwr >= ACWR_HARD_MAX) {
     return true;
   }
 
-  // 2) ATL über oberem Band → absolut zu hoch
   if (atl > maxAtl) {
     return true;
   }
@@ -109,11 +106,12 @@ function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
 }
 
 /**
- * Entlastungswoche (Deload): ca. 90 % des Erhaltungsniveaus.
+ * Entlastungswoche (Deload):
+ * - 20 % weniger TSS als eine "normale" Aufbauwoche (refWeekTss)
  */
-function computeDeloadWeek(ctl, atl) {
-  const tssMean = DELOAD_FACTOR * ctl;
-  const weekTss = tssMean * 7;
+function computeDeloadWeek(ctl, atl, refWeekTss) {
+  const weekTss = refWeekTss * 0.8;      // 20% weniger TSS
+  const tssMean = weekTss / 7;
 
   const ctlDelta = (tssMean - ctl) / 6;
   const nextCtl = ctl + ctlDelta;
@@ -134,45 +132,54 @@ function computeDeloadWeek(ctl, atl) {
 }
 
 /**
- * Berechnet NUR die nächste Woche auf Basis des aktuellen CTL/ATL.
- * - Standardziel: +0.8 CTL/Woche
- * - begrenzt durch ACWR-Safety
- * - bei zu hohem ACWR oder ATL (absolut) → Deload
+ * Plant EINE Woche:
+ * - Ziel: +0.8 CTL/Woche, begrenzt durch ACWR
+ * - Wenn aktuelle ATL/ACWR zu hoch → Deload mit 20% weniger TSS
  */
-function calcNextWeekTarget(ctl, atl) {
-  // 1) Deload-Check
-  if (shouldDeload(ctl, atl)) {
-    return computeDeloadWeek(ctl, atl);
-  }
-
-  // 2) Aufbauwoche mit Zielrampe 0.8, begrenzt durch ACWR
+function planWeek(ctl, atl) {
+  // Referenz-Aufbauwoche berechnen (ohne Deload-Check)
   const dMaxSafe = maxSafeCtlDelta(ctl);
   let targetDelta = CTL_DELTA_TARGET;
 
   if (!isFinite(dMaxSafe) || dMaxSafe <= 0) {
-    // ACWR lässt keine Steigerung zu → Erhaltungswoche
-    targetDelta = 0;
+    targetDelta = 0; // ACWR erlaubt keine Steigerung → Erhaltungswoche
   } else if (dMaxSafe < targetDelta) {
-    // ACWR würde bei 0.8 zu hoch → auf sicheres Maximum begrenzen
-    targetDelta = dMaxSafe;
+    targetDelta = dMaxSafe; // durch ACWR limitiert
   }
 
-  return computeWeekFromCtlDelta(ctl, atl, targetDelta);
+  const refBuildWeek = computeWeekFromCtlDelta(ctl, atl, targetDelta);
+
+  // Jetzt entscheiden, ob wir statt dessen deloaden
+  const fatigueDeload = shouldDeloadByFatigue(ctl, atl);
+
+  if (fatigueDeload) {
+    const deloadWeek = computeDeloadWeek(ctl, atl, refBuildWeek.weekTss);
+    return deloadWeek;
+  }
+
+  // Sonst normale Build-/Maintain-Woche
+  return refBuildWeek;
 }
 
 /**
  * Simuliert die folgenden Wochen NACH dieser Woche.
- * week0 = Ergebnis von calcNextWeekTarget() für die aktuelle Woche.
+ * thisWeekPlan = Ergebnis von planWeek() für die aktuelle Woche.
  */
-function simulateFutureWeeks(ctlStart, atlStart, mondayDate, weeks, week0) {
+function simulateFutureWeeks(
+  ctlStart,
+  atlStart,
+  mondayDate,
+  weeks,
+  thisWeekPlan
+) {
   const progression = [];
 
   // Erst diese Woche "einschmelzen"
-  let ctl = week0.nextCtl;
-  let atl = week0.nextAtl;
+  let ctl = thisWeekPlan.nextCtl;
+  let atl = thisWeekPlan.nextAtl;
 
   for (let w = 1; w <= weeks; w++) {
-    const weekResult = calcNextWeekTarget(ctl, atl);
+    const weekResult = planWeek(ctl, atl);
 
     const future = new Date(mondayDate);
     future.setUTCDate(future.getUTCDate() + 7 * w);
@@ -230,8 +237,8 @@ async function handle(dryRun = true) {
     const ctl = well.ctl ?? 0;
     const atl = well.atl ?? 0;
 
-    // Diese Woche berechnen
-    const thisWeekPlan = calcNextWeekTarget(ctl, atl);
+    // Diese Woche planen (intelligent: BUILD oder DELOAD)
+    const thisWeekPlan = planWeek(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
 
     // Folgewochen simulieren (z.B. 6 Wochen)
@@ -277,7 +284,7 @@ async function handle(dryRun = true) {
             monday: mondayStr,
             ctl,
             atl,
-            weekType: thisWeekPlan.weekType,  // BUILD / MAINTAIN / DELOAD
+            weekType: thisWeekPlan.weekType,  // BUILD / DELOAD / MAINTAIN
             weeklyTargetTss,
             ctlDelta: thisWeekPlan.ctlDelta,
             acwr: thisWeekPlan.acwr
