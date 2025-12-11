@@ -62,7 +62,6 @@ function classifyWeek(ctl, atl, rampRate) {
   else tsbCritical = -15;
 
   const isTsbTired = tsb <= tsbCritical;
-
   let atlCtlRatio = ctl > 0 ? atl / ctl : Infinity;
   let atlRatioThreshold = ctl < 50 ? 1.2 : ctl < 80 ? 1.3 : 1.4;
   const isAtlHigh = atlCtlRatio >= atlRatioThreshold;
@@ -78,48 +77,50 @@ function classifyWeek(ctl, atl, rampRate) {
 // Marker: Decoupling & PDC (GA-Filter + Intensiv)
 // ---------------------------------------------------------
 function computeMarkers(units, hrMax, ftp) {
-  // GA1/GA2 Filter: mindestens 30min, Endurance, HF ≤85% HFmax, Watt ≤100% FTP
+  if (!Array.isArray(units)) units = [];
+
   const gaUnits = units.filter(u => {
     const durationOk = u.durationMinutes >= 30;
     const isEndurance = ["Endurance", "LongRide", "EasyRun"].includes(u.type);
-    const hrOk = u.hrAvg && u.hrAvg <= 0.85 * hrMax;
-    const powerOk = u.wattsAvg && u.wattsAvg <= 1.0 * ftp;
+    const hrOk = u.hrAvg != null && u.hrAvg <= 0.85 * hrMax;
+    const powerOk = u.wattsAvg != null && u.wattsAvg <= 1.0 * ftp;
     return durationOk && isEndurance && hrOk && powerOk;
   });
 
-  let decoupling = null;
+  let decupling = null;
   if (gaUnits.length > 0) {
-    const sumDecu = gaUnits.reduce((acc, u) => acc + (u.hrAvg / u.wattsAvg - 1), 0);
-    decoupling = sumDecu / gaUnits.length;
+    const sumDecu = gaUnits.reduce((acc, u) => acc + ((u.hrAvg / u.wattsAvg) - 1), 0);
+    decupling = sumDecu / gaUnits.length;
   }
 
-  // PDC = Peak Dauerleistung aus intensiven Einheiten
   const intenseUnits = units.filter(u => ["Interval", "Sprint", "VO2Max"].includes(u.type));
   let pdc = null;
   if (intenseUnits.length > 0) {
-    const peakPowers = intenseUnits.map(u => u.wattsMax || u.wattsAvg);
-    pdc = Math.max(...peakPowers) / ftp;
+    const peakPowers = intenseUnits.map(u => u.wattsMax || u.wattsAvg).filter(v => v != null);
+    if (peakPowers.length > 0) pdc = Math.max(...peakPowers) / ftp;
   }
 
-  return { decoupling, pdc };
+  return { decupling, pdc };
 }
 
 // ---------------------------------------------------------
 // Wochenphase Empfehlung
-// -------------------------------------------------------
+// ---------------------------------------------------------
 function recommendWeekPhase(lastWeekMarkers, weekState) {
   const decupling = lastWeekMarkers?.decupling ?? null;
   const pdc = lastWeekMarkers?.pdc ?? null;
 
-  let phase = "Aufbau"; // Default
+  let phase = "Aufbau";
   if (decupling === null || pdc === null) phase = "Grundlage";
-  else if (decupling > 5) phase = "Grundlage"; 
-  else if (pdc < 0.9) phase = "Intensiv";     
+  else if (decupling > 5) phase = "Grundlage";
+  else if (pdc < 0.9) phase = "Intensiv";
   else phase = "Aufbau";
 
   if (weekState === "Müde") phase = "Erholung";
+
   return phase;
 }
+
 // ---------------------------------------------------------
 // 6-Wochen-Simulation inkl. Wochenphase & Marker
 // ---------------------------------------------------------
@@ -158,41 +159,48 @@ async function simulatePlannedWeeks(
 
     const { state: simState } = classifyWeek(ctlEnd, atlEnd, rampSim);
 
-    let nextTarget = prevTarget;
-    if (simState === "Müde") nextTarget = prevTarget*0.8;
-    else {
-      if (rampSim < 0.5) nextTarget = prevTarget*(simState==="Erholt"?1.12:1.08);
-      else if (rampSim<1.0) nextTarget = prevTarget*(simState==="Erholt"?1.08:1.05);
-      else if (rampSim<=1.5) nextTarget = prevTarget*1.02;
-      else nextTarget = prevTarget*0.9;
+    const lastWeekMarkers = computeMarkers(units, hrMax, ftp);
+    const phase = recommendWeekPhase(lastWeekMarkers, simState);
+
+    const emoji = stateEmoji(simState);
+
+    // ------------------------------
+    // Fix: Multiplier aufsplitten statt verschachtelte ternäre
+    // ------------------------------
+    let multiplier = 1.0;
+    if (simState === "Müde") {
+      multiplier = 0.8;
+    } else if (rampSim < 0.5) {
+      multiplier = simState === "Erholt" ? 1.12 : 1.08;
+    } else if (rampSim < 1.0) {
+      multiplier = simState === "Erholt" ? 1.08 : 1.05;
+    } else if (rampSim <= 1.5) {
+      multiplier = 1.02;
+    } else {
+      multiplier = 0.9;
     }
-    const minWeekly = prevTarget*0.75;
-    const maxWeekly = prevTarget*1.25;
-    nextTarget = Math.max(minWeekly, Math.min(maxWeekly, nextTarget));
-    nextTarget = Math.round(nextTarget/5)*5;
+
+    let nextTarget = prevTarget * multiplier;
+    nextTarget = Math.max(prevTarget * 0.75, Math.min(prevTarget * 1.25, nextTarget));
+    nextTarget = Math.round(nextTarget / 5) * 5;
 
     const mondayFutureDate = new Date(mondayDate);
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate()+7*w);
     const mondayId = mondayFutureDate.toISOString().slice(0,10);
 
-    const lastWeekMarkers = computeMarkers(units, hrMax, ftp);
-    const phase = recommendWeekPhase(lastWeekMarkers, simState);
-
-    const emoji = stateEmoji(simState);
     const planText = `Rest ${nextTarget} | ${emoji} ${simState} | Phase: ${phase}`;
 
     const payloadFuture = {
       id: mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
       [INTERVALS_PLAN_FIELD]: planText,
-      comments: `Wochenphase automatisch berechnet:
-- Phase: ${phase} (${weekState} in dieser Woche)
-- Aerobe Belastung: Decoupling=${lastWeekMarkers.decupling?.toFixed(2)} 
-  (niedrig = gute aerobe Basis, hoch = evtl. Müdigkeit)
-- Anaerobe Belastung: PDC=${lastWeekMarkers.pdc?.toFixed(2)} 
-  (Peak Dauerleistung im Vergleich zu FTP)
-- Empfehlung: Trainingsintensität und Volumen anpassen basierend auf diesen Markern`
-}
+      comments: `Wochenphase automatisch:
+- Phase: ${phase} (${simState})
+- Aerobe Basis: Decoupling=${lastWeekMarkers.decupling?.toFixed(2)} (niedrig=gut, hoch=verschlissen)
+- Anaerobe Kapazität: PDC=${lastWeekMarkers.pdc?.toFixed(2)} (Peak Dauerleistung vs. FTP)
+- Empfehlung: Intensität & Volumen anpassen`
+    };
+
     try {
       const resFuture = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`, {
         method:"PUT",
@@ -211,7 +219,8 @@ async function simulatePlannedWeeks(
       monday:mondayId,
       weeklyTarget:nextTarget,
       state:simState,
-      phase:phase
+      phase:phase,
+      markers:lastWeekMarkers
     });
   }
 
@@ -252,21 +261,16 @@ async function handle(env) {
     // 2) Montag
     const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
 
-    // 3) Alle Einheiten der Woche holen
+    // 3) Einheiten der Woche
     const sundayDate = new Date(mondayDate);
     sundayDate.setUTCDate(sundayDate.getUTCDate()+6);
-    // 3) Alle Einheiten der Woche holen
-const unitsRes = await fetch(`${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sundayDate.toISOString().slice(0,10)}`, { headers:{Authorization: authHeader}});
-const unitsJson = await unitsRes.json();
+    const unitsRes = await fetch(`${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sundayDate.toISOString().slice(0,10)}`, { headers:{Authorization: authHeader}});
+    const unitsJson = await unitsRes.json();
+    const units = unitsJson.activities ?? unitsJson.data ?? [];
 
-// Prüfen, ob Array vorhanden
-const units = unitsJson.activities ?? unitsJson.data ?? [];
-
-    // HRmax & FTP aus Wellness oder Athlete-Profil
     const hrMax = wellness.hrMax || 173;
-    const ftp = wellness.ftp || 250; // Beispiel, anpassen
+    const ftp = wellness.ftp || 250;
 
-    // 4) 6 Wochen Simulation
     const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD] ?? Math.round(dailyTargetBase*7);
     const weeklyProgression = await simulatePlannedWeeks(
       ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, units, hrMax, ftp, 6
