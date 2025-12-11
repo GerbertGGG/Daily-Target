@@ -7,13 +7,11 @@ const BASE_URL = "https://intervals.icu/api/v1";
 const INTERVALS_API_KEY = "1xg1v04ym957jsqva8720oo01";
 const INTERVALS_ATHLETE_ID = "i105857";
 
-const INTERVALS_TARGET_FIELD = "TageszielTSS";
 const INTERVALS_PLAN_FIELD = "WochenPlan";
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const DAILY_TYPE_FIELD = "TagesTyp";
 
 const DEFAULT_PLAN_STRING = "Mo,Mi,Fr,So";
-
 
 //----------------------------------------------------------
 // HELPERS
@@ -55,7 +53,6 @@ function stateEmoji(state) {
   return "⚖️";
 }
 
-
 //----------------------------------------------------------
 // CTL / ATL / MÜDIGKEIT
 //----------------------------------------------------------
@@ -65,7 +62,6 @@ function computeDailyTarget(ctl, atl) {
   const daily = ctl * (1 + 0.05 * tsbClamped);
   return Math.round(Math.max(0, Math.min(daily, ctl * 1.5)));
 }
-
 
 function classifyWeek(ctl, atl, rampRate) {
   const tsb = ctl - atl;
@@ -88,9 +84,8 @@ function classifyWeek(ctl, atl, rampRate) {
   return { state: "Normal", tsb };
 }
 
-
 //----------------------------------------------------------
-// MARKER: Aerob, Anaerob, Polarisation, ACWR
+// MARKER: Aerob, Anaerob, Polarisation, ACWR (28 Tage!)
 //----------------------------------------------------------
 function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   if (!Array.isArray(units)) units = [];
@@ -102,30 +97,32 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   let z1z2 = 0, z3z5 = 0, total = 0;
 
   for (const u of units) {
-    if (!u.durationMinutes || u.hrAvg == null || hrMax <= 0) continue;
+    if (!u.duration || u.hrAvg == null || hrMax <= 0) continue;
 
+    const durMin = u.duration / 60;
     const hrRel = u.hrAvg / hrMax;
-    total += u.durationMinutes;
 
-    if (hrRel <= 0.80) z1z2 += u.durationMinutes;
-    else z3z5 += u.durationMinutes;
+    total += durMin;
+
+    if (hrRel <= 0.80) z1z2 += durMin;
+    else z3z5 += durMin;
   }
 
   const polarisationIndex = total > 0 ? z1z2 / total : null;
 
   // --- Quality Sessions ---
   const qualitySessions = units.filter(u =>
-    ["Interval", "VO2Max", "Sprint"].includes(u.type)
+    ["Interval", "VO2Max", "Sprint", "Threshold"].includes(u.type)
   ).length;
 
   // --- Decoupling / Durability ---
   const gaUnits = units.filter(u =>
-    u.durationMinutes >= 30 &&
-    ["Endurance", "LongRide", "EasyRun"].includes(u.type) &&
+    u.duration >= 1800 && // mind. 30 min
     u.hrAvg != null &&
     u.wattsAvg != null &&
     u.wattsAvg > 0 &&
-    u.hrAvg <= 0.85 * hrMax
+    u.hrAvg <= 0.85 * hrMax &&
+    ["Endurance", "LongRide", "Ride", "Run"].includes(u.type)
   );
 
   let decoupling = null;
@@ -133,13 +130,12 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
     const sum = gaUnits.reduce((acc, u) =>
       acc + ((u.hrAvg / u.wattsAvg) - 1)
     , 0);
-    decoupling = sum / gaUnits.length; // 0.03 = 3 %
+    decoupling = sum / gaUnits.length;
   }
 
   // --- PDC ---
   let pdc = null;
   const peaks = units
-    .filter(u => ["Interval", "VO2Max", "Sprint"].includes(u.type))
     .map(u => u.wattsMax ?? u.wattsAvg)
     .filter(v => v != null && v > 0);
 
@@ -155,9 +151,8 @@ function computeExtendedMarkers(units, hrMax, ftp, ctl, atl) {
   };
 }
 
-
 //----------------------------------------------------------
-// FITNESS SCORES (🟢🟡🔴)
+// FITNESS SCORES
 //----------------------------------------------------------
 function computeFitnessScores(m) {
   const score = {};
@@ -180,7 +175,7 @@ function computeFitnessScores(m) {
   else if (m.pdc >= 0.85 && m.qualitySessions >= 1) score.anaerobic = "🟡";
   else score.anaerobic = "🔴";
 
-  // Workload (ACWR)
+  // Workload
   if (m.acwr == null) score.workload = "🟡";
   else if (m.acwr >= 0.8 && m.acwr <= 1.3) score.workload = "🟢";
   else if (m.acwr >= 0.7 && m.acwr <= 1.4) score.workload = "🟡";
@@ -189,9 +184,8 @@ function computeFitnessScores(m) {
   return score;
 }
 
-
 //----------------------------------------------------------
-// NEUE WOCHENPHASEN LOGIK
+// WOCHENPHASE (verbessert, robust)
 //----------------------------------------------------------
 function recommendWeekPhaseV2(scores, fatigueState) {
 
@@ -208,16 +202,15 @@ function recommendWeekPhaseV2(scores, fatigueState) {
 
   return "Aufbau";
 }
-
-
 //----------------------------------------------------------
 // 6-WOCHEN-SIMULATION
 //----------------------------------------------------------
 async function simulateWeeks(
   ctlStart, atlStart, fatigueStateStart, weeklyTargetStart,
   mondayDate, planSelected, authHeader, athleteId,
-  units, hrMax, ftp, weeksToSim
+  units28, hrMax, ftp, weeksToSim
 ) {
+
   const tauCtl = 42;
   const tauAtl = 7;
 
@@ -237,6 +230,7 @@ async function simulateWeeks(
 
     const ctlStartW = ctl;
 
+    // CTL/ATL Simulation über die Woche
     for (let d = 0; d < 7; d++) {
       const load = prevTarget * (dayWeights[d] / sumWeights);
       ctl = ctl + (load - ctl) / tauCtl;
@@ -246,13 +240,14 @@ async function simulateWeeks(
     const ramp = ctl - ctlStartW;
     const { state: weekState } = classifyWeek(ctl, atl, ramp);
 
-    const markers = computeExtendedMarkers(units, hrMax, ftp, ctl, atl);
+    // Marker & Scores aus 28 Tagen
+    const markers = computeExtendedMarkers(units28, hrMax, ftp, ctl, atl);
     const scores = computeFitnessScores(markers);
-    const phase = recommendWeekPhaseV2(scores, weekState);
 
+    const phase = recommendWeekPhaseV2(scores, weekState);
     const emoji = stateEmoji(weekState);
 
-    // Progression
+    // Progression für neues Wochenziel
     let multiplier = 1.0;
     if (weekState === "Müde") multiplier = 0.8;
     else if (ramp < 0.5) multiplier = weekState === "Erholt" ? 1.12 : 1.08;
@@ -264,25 +259,28 @@ async function simulateWeeks(
     nextTarget = Math.max(prevTarget * 0.75, Math.min(prevTarget * 1.25, nextTarget));
     nextTarget = Math.round(nextTarget / 5) * 5;
 
+    // Datum für nächste Woche
     const mondayFuture = new Date(mondayDate);
     mondayFuture.setUTCDate(mondayFuture.getUTCDate() + 7 * w);
     const mondayId = mondayFuture.toISOString().slice(0, 10);
 
+    // Text für Intervals
     const payload = {
       id: mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
       [INTERVALS_PLAN_FIELD]: `Rest ${nextTarget} | ${emoji} ${weekState} | Phase: ${phase}`,
       comments:
-`Fitness-Analyse:
+`Fitness-Analyse (28 Tage):
 Aerob: ${scores.aerobic} (Decoupling ${markers.decoupling != null ? (markers.decoupling*100).toFixed(1)+"%" : "n/a"})
 Anaerob: ${scores.anaerobic} (PDC ${(markers.pdc*100).toFixed(0)}%)
 Polarisation: ${scores.polarisation} (${(markers.polarisationIndex*100).toFixed(0)}% Z1/Z2)
 Workload (ACWR): ${scores.workload} (${markers.acwr?.toFixed(2)})
 
-Empfohlene Phase: ${phase}
+Empfohlene Wochenphase: ${phase}
 `
     };
 
+    // Update in Intervals
     try {
       const res = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`, {
         method: "PUT",
@@ -295,6 +293,7 @@ Empfohlene Phase: ${phase}
       console.error("Exception updating future week:", e);
     }
 
+    // Speichern
     progression.push({
       weekOffset: w,
       monday: mondayId,
@@ -313,13 +312,12 @@ Empfohlene Phase: ${phase}
 
 
 //----------------------------------------------------------
-// MAIN
+// MAIN: holt Wellness, lädt 28-Tage Aktivitäten, simuliert 6 Wochen
 //----------------------------------------------------------
 async function handle(env) {
   try {
-
-    const apiKey = INTERVALS_API_KEY;
     const athleteId = INTERVALS_ATHLETE_ID;
+    const apiKey = INTERVALS_API_KEY;
     const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
 
     const now = new Date();
@@ -334,7 +332,7 @@ async function handle(env) {
 
     const mondayStr = mondayDate.toISOString().slice(0, 10);
 
-    // → Wellness
+    // Wellness der aktuellen Woche
     const wRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`, {
       headers: { Authorization: authHeader }
     });
@@ -352,36 +350,48 @@ async function handle(env) {
       wellness[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING
     );
 
-    // → Activities der Woche
-    const sunday = new Date(mondayDate);
-    sunday.setUTCDate(sunday.getUTCDate() + 6);
-
-    const aRes = await fetch(
-      `${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sunday.toISOString().slice(0,10)}`,
-      { headers: { Authorization: authHeader } }
-    );
-    const aJson = await aRes.json();
-    const units = aJson.activities ?? aJson.data ?? [];
-
     const hrMax = wellness.hrMax ?? 173;
     const ftp = wellness.ftp ?? 250;
 
-    const weeklyStart = wellness[WEEKLY_TARGET_FIELD] ?? Math.round(dailyTarget * 7);
+    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD] ??
+      Math.round(dailyTarget * 7);
 
-    // → Simulation
+    // -------------------------------------------------------
+    // WICHTIG: 28-Tage Aktivitäten laden
+    // -------------------------------------------------------
+    const start28 = new Date(mondayDate);
+    start28.setUTCDate(start28.getUTCDate() - 28);
+    const startStr = start28.toISOString().slice(0, 10);
+
+    const end28 = new Date(mondayDate);
+    end28.setUTCDate(end28.getUTCDate() + 6);
+    const endStr = end28.toISOString().slice(0, 10);
+
+    const actRes = await fetch(
+      `${BASE_URL}/athlete/${athleteId}/activities?from=${startStr}&to=${endStr}`,
+      { headers: { Authorization: authHeader } }
+    );
+
+    const actJson = await actRes.json();
+    const units28 = actJson.activities ?? actJson.data ?? [];
+
+    // -------------------------------------------------------
+    // Simulation auf Basis 28-Tage Marker
+    // -------------------------------------------------------
     const progression = await simulateWeeks(
-      ctl, atl, weekState, weeklyStart,
+      ctl, atl, weekState, weeklyTargetStart,
       mondayDate, planSelected,
       authHeader, athleteId,
-      units, hrMax, ftp,
+      units28, hrMax, ftp,
       6
     );
 
+    // JSON-Ausgabe
     return new Response(JSON.stringify({
       dryRun: true,
       thisWeek: {
         monday: mondayStr,
-        weeklyTarget: weeklyStart,
+        weeklyTarget: weeklyTargetStart
       },
       progression
     }, null, 2));
@@ -393,7 +403,7 @@ async function handle(env) {
 
 
 //----------------------------------------------------------
-// EXPORT → WICHTIG!!!
+// EXPORT (ESSENTIELL FÜR CLOUDFLARE!)
 //----------------------------------------------------------
 export default {
   async fetch(request, env, ctx) {
