@@ -115,13 +115,13 @@ function generateLongTermBriefing(mondayId, phase, simState, tssPrev, tssCurrent
 }
 
 // ------------------- 6-Wochen Simulation -------------------
-async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, historicalMarkers){
+async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, weeksToSim, historicalMarkers, writeToIntervals = false){
   const tauCtl = 42, tauAtl = 7;
   let dayWeights = new Array(7).fill(0);
   let countSelected = 0;
   for(let i=0;i<7;i++) if(planSelected[i]){dayWeights[i]=1; countSelected++;}
   if(countSelected===0){dayWeights=[1,0,1,0,1,0,1]; countSelected=4;}
-  let sumWeights = dayWeights.reduce((a,b)=>a+b,0);
+  const sumWeights = dayWeights.reduce((a,b)=>a+b,0);
 
   let ctl = ctlStart, atl = atlStart, prevTarget = weeklyTargetStart, prevState = weekStateStart;
   const weeklyProgression = [];
@@ -141,39 +141,42 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
     const rampSim = ctlEnd - ctlAtWeekStart;
     const {state: simState} = classifyWeek(ctlEnd, atlEnd, rampSim);
 
-    // Ziel TSS für nächste Woche anpassen
+    // RampSim-Impact auf Wochenziel geglättet
     let nextTarget = prevTarget;
-    if(simState==="Müde") nextTarget = prevTarget*0.8;
-    else{
-      if(rampSim<0.5) nextTarget = prevTarget*(simState==="Erholt"?1.12:1.08);
-      else if(rampSim<1.0) nextTarget = prevTarget*(simState==="Erholt"?1.08:1.05);
-      else if(rampSim<=1.5) nextTarget = prevTarget*1.02;
-      else nextTarget = prevTarget*0.9;
-    }
-    nextTarget = Math.max(prevTarget*0.75,Math.min(prevTarget*1.25,nextTarget));
+    if(simState==="Müde") nextTarget = prevTarget*0.9;
+    else if(rampSim < 0.5) nextTarget = prevTarget*1.03;
+    else if(rampSim < 1.0) nextTarget = prevTarget*1.05;
+    else if(rampSim < 1.5) nextTarget = prevTarget*1.08;
+    else nextTarget = prevTarget*1.10;
+
+    nextTarget = Math.max(prevTarget*0.75, Math.min(prevTarget*1.25, nextTarget));
     nextTarget = Math.round(nextTarget/5)*5;
 
-    // Montag der zukünftigen Woche
     const mondayFutureDate = new Date(mondayDate);
     mondayFutureDate.setUTCDate(mondayFutureDate.getUTCDate() + 7*w);
     const mondayId = mondayFutureDate.toISOString().slice(0,10);
 
-    // Historische Marker für die letzte Woche
+    // Historische Marker
     const lastWeekMarkers = historicalMarkers[w-1] || {decupling:3,pdc:0.95, prevDecupling:3, prevPDC:0.95};
 
-    // --- DC/PDC-Schätzung für die Phase ---
-    const simDecoupling = lastWeekMarkers.decupling + 0.2 * rampSim;  // Alpha-Faktor leicht
-    const simPDC = lastWeekMarkers.pdc + 0.02 * rampSim;              // Beta-Faktor leicht
+    // --- DC/PDC realistisch schätzen (Trend + Ramp) ---
+    const recentMarkers = historicalMarkers.slice(Math.max(0,w-4), w);
+    let dcTrend = 0, pdcTrend = 0;
+    if(recentMarkers.length >= 2){
+      for(let i=1;i<recentMarkers.length;i++){
+        dcTrend += (recentMarkers[i].decupling - recentMarkers[i-1].decupling)/recentMarkers.length;
+        pdcTrend += (recentMarkers[i].pdc - recentMarkers[i-1].pdc)/recentMarkers.length;
+      }
+    }
+    const simDecoupling = lastWeekMarkers.decupling + dcTrend + 0.1*rampSim;
+    const simPDC = lastWeekMarkers.pdc + pdcTrend + 0.01*rampSim;
     const estimatedMarkers = { ...lastWeekMarkers, decupling: simDecoupling, pdc: simPDC };
 
     const phase = recommendWeekPhase(estimatedMarkers, simState);
 
-    // Briefing wie bisher
-    const markers42d = historicalMarkers[Math.max(0,w-6)] || lastWeekMarkers;
-    const markers90d = historicalMarkers[Math.max(0,w-13)] || lastWeekMarkers;
-    const briefing = generateLongTermBriefing(mondayId, phase, simState, prevTarget, nextTarget, lastWeekMarkers, markers42d, markers90d, rampSim);
+    // Briefing minimalistisch
+    const briefing = `Woche: ${mondayId} | Phase: ${phase} | Zustand: ${simState} | Wochenziel: ${nextTarget} TSS`;
 
-    // Payload für Intervals
     const payloadFuture = {
       id: mondayId,
       [WEEKLY_TARGET_FIELD]: nextTarget,
@@ -181,15 +184,19 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
       comments: briefing
     };
 
-    try{
-      const resFuture = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,{
-        method:"PUT",
-        headers:{"Content-Type":"application/json", Authorization:authHeader},
-        body:JSON.stringify(payloadFuture)
-      });
-      if(!resFuture.ok){const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId,resFuture.status,txt);} 
-      else if(resFuture.body) resFuture.body.cancel?.();
-    }catch(e){console.error("Error updating future week:", e);} 
+    if(writeToIntervals){
+      try{
+        const resFuture = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${mondayId}`,{
+          method:"PUT",
+          headers:{"Content-Type":"application/json", Authorization:authHeader},
+          body:JSON.stringify(payloadFuture)
+        });
+        if(!resFuture.ok){ const txt = await resFuture.text(); console.error("Failed to update future wellness:", mondayId,resFuture.status,txt); } 
+        else if(resFuture.body) resFuture.body.cancel?.();
+      }catch(e){console.error("Error updating future week:", e);} 
+    } else {
+      console.log(`Simulation für ${mondayId} (nicht Montag) – kein Schreiben`);
+    }
 
     prevTarget = nextTarget;
     prevState = simState;
@@ -199,8 +206,7 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
   return weeklyProgression;
 }
 
-
-// ------------------- Hauptlogik -------------------
+// ------------------- handle() Hauptlogik -------------------
 async function handle(env){
   try{
     const apiKey = INTERVALS_API_KEY, athleteId = INTERVALS_ATHLETE_ID;
@@ -211,75 +217,40 @@ async function handle(env){
     const today = now.toISOString().slice(0,10);
     const todayDate = new Date(today+"T00:00:00Z");
     const jsDay = todayDate.getUTCDay();
-    const isMonday = (jsDay === 1); // Montag = 1
+    const isMonday = (jsDay === 1);
+    const writeToIntervals = isMonday;
+
     const offset = jsDay===0?6:jsDay-1;
     const mondayDate = new Date(todayDate);
     mondayDate.setUTCDate(mondayDate.getUTCDate()-offset);
 
-    // Wellness-Daten abrufen
     const wellnessRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{headers:{Authorization:authHeader}});
-    if(!wellnessRes.ok){
-      const text = await wellnessRes.text();
-      return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});
-    }
+    if(!wellnessRes.ok){ const text = await wellnessRes.text(); return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});}
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl, atl = wellness.atl, rampRate = wellness.rampRate??0;
     if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
     const {state: weekState} = classifyWeek(ctl, atl, rampRate);
 
-    // --- Nur Montag: Wochenziel, Phase & Kommentar schreiben ---
-    if(isMonday){
-      const dailyTargetBase = computeDailyTarget(ctl, atl);
-      const currentMarkers = computeMarkers(wellness.units??[]);
-      const phaseNow = recommendWeekPhase(currentMarkers, weekState);
-      const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+    // Tagesziel nicht schreiben, nur Simulation der Wochen
+    const dailyTargetBase = computeDailyTarget(ctl, atl);
+    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+    const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
+    const historicalMarkers = wellness.historicalMarkers??[];
 
-      const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`;
+    const weeklyProgression = await simulatePlannedWeeks(
+      ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers, writeToIntervals
+    );
 
-      const commentExplanation = `Wochenziel TSS (Stand: ${today}):
-- Phase: ${phaseNow}
-- Simulierter Zustand: ${weekState}
-- Wochenziel: ${weeklyTargetStart} TSS
-Hinweis: Tagesziele werden nur montags aktualisiert.`;
-
-      const payloadToday = {
-        id: today,
-        [WEEKLY_TARGET_FIELD]: weeklyTargetStart,
-        [INTERVALS_PLAN_FIELD]: dayPlanText,
-        comments: commentExplanation
-      };
-
-      try{
-        const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
-          method: "PUT",
-          headers: {"Content-Type": "application/json", Authorization: authHeader},
-          body: JSON.stringify(payloadToday)
-        });
-        if(!updateRes.ok){ 
-          const txt = await updateRes.text(); 
-          console.error("Failed to update Monday's wellness:", updateRes.status, txt); 
-        } else { 
-          console.log("Updated weekly target, phase, and comment (Monday)"); 
-        }
-      } catch(e){ console.error("Error updating Monday's target/comment:", e); }
-
-      // --- 6-Wochen Simulation ebenfalls nur Montag ---
-      const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
-      const historicalMarkers = wellness.historicalMarkers??[];
-      const weeklyProgression = await simulatePlannedWeeks(ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers);
-
-      return new Response(JSON.stringify({ monday:true, weeklyProgression },null,2),{status:200});
-    } else {
-      // Unter der Woche: keine Berechnung
-      console.log("Heute ist nicht Montag – keine Berechnungen oder Kommentare.");
-      return new Response(JSON.stringify({ monday:false, message:"Keine Berechnungen unter der Woche" },null,2),{status:200});
-    }
-
+    return new Response(JSON.stringify({ monday:isMonday, weeklyProgression },null,2),{status:200});
   } catch(err){
     console.error("Unexpected error:",err); 
     return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});
   }
 }
+
+
+
+
 
 
 // ------------------- EXPORT -------------------
