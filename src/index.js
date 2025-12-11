@@ -561,4 +561,3 @@ export default {
     ctx.waitUntil(handle());
   }
 };
-
