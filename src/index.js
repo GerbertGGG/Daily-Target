@@ -218,7 +218,7 @@ async function handle(env){
     const todayDate = new Date(today+"T00:00:00Z");
     const jsDay = todayDate.getUTCDay();
     const isMonday = (jsDay === 1);
-    const writeToIntervals = isMonday;
+    const writeToIntervals = true;
 
     const offset = jsDay===0?6:jsDay-1;
     const mondayDate = new Date(todayDate);
