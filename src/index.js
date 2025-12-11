@@ -122,7 +122,7 @@ function computeMarkers(units, hrMax, ftp, ctl, atl) {
   // Strength ignorieren
   const filtered = cleaned.filter(u => u.sport !== "WeightTraining");
 
-  // ACWR im Marker: atl/ctl ist hier mehr "akut vs chronisch"
+  // ACWR im Marker: atl/ctl = akut vs. chronisch
   const acwr = ctl > 0 ? atl / ctl : null;
 
   // Polarisation (über HR)
@@ -230,104 +230,117 @@ function recommendPhase(scores, fatigue) {
 }
 
 //----------------------------------------------------------
-// CTL-basiertes Weekly Target (0.8–1.3 CTL-Steigerung + ACWR 0.8–1.3)
+// CTL-/ATL-Forecast & Weekly Target (0.8–1.3 CTL/Woche + Deload)
 //----------------------------------------------------------
-function findWeeklyTargetByCtl(ctl, atl, rolling4Avg, dayWeights) {
-  const tauCtl = 42;
-  const tauAtl = 7;
 
-  let weights = Array.isArray(dayWeights) ? [...dayWeights] : [1, 0, 1, 0, 1, 0, 0];
-  let sumW = weights.reduce((a, b) => a + b, 0);
-  if (sumW <= 0) {
-    weights = [1, 0, 1, 0, 1, 0, 0];
-    sumW = 3;
-  }
+// Ziel-Steigerungen pro Woche
+const CTL_DELTA_MIN = 0.8;
+const CTL_DELTA_MAX = 1.3;
 
-  const base = rolling4Avg > 0 ? rolling4Avg : 100;
-  const minWeekly = base * 0.9;
-  const maxWeekly = base * 1.3;
+// ACWR-Limit (ATL / CTL)
+const ACWR_SAFE_MAX = 1.3;
 
-  const step = 5; // in 5er-Schritten
+// Ermüdungs-Limit: ATL - CTL > 10 => Kandidat für Deload
+const FATIGUE_GAP_THRESHOLD = 10;
 
-  let best = null;
+// Deload-Faktor: 90 % der Erhaltungsbelastung (~CTL)
+const DELOAD_FACTOR = 0.9;
 
-  // 1. Versuch: strenge Bedingungen: ramp 0.8–1.3 UND ACWR 0.8–1.3
-  for (
-    let tss = Math.round(minWeekly / step) * step;
-    tss <= Math.round(maxWeekly / step) * step;
-    tss += step
-  ) {
-    let ctlSim = ctl;
-    let atlSim = atl;
-
-    for (let d = 0; d < 7; d++) {
-      const load = tss * (weights[d] / sumW);
-      ctlSim = ctlSim + (load - ctlSim) / tauCtl;
-      atlSim = atlSim + (load - atlSim) / tauAtl;
-    }
-
-    const ramp = ctlSim - ctl;
-    const acwr = rolling4Avg > 0 ? tss / rolling4Avg : 1.0;
-
-    if (
-      ramp >= 0.8 && ramp <= 1.3 &&
-      acwr >= 0.8 && acwr <= 1.3
-    ) {
-      best = { tss, ctl: ctlSim, atl: atlSim, ramp, acwr };
-      break; // kleinste TSS, die alle Bedingungen erfüllt
-    }
-  }
-
-  // 2. Falls nichts gefunden: Bedingungen etwas lockern
-  if (!best) {
-    for (
-      let tss = Math.round(minWeekly / step) * step;
-      tss <= Math.round(maxWeekly / step) * step;
-      tss += step
-    ) {
-      let ctlSim = ctl;
-      let atlSim = atl;
-
-      for (let d = 0; d < 7; d++) {
-        const load = tss * (weights[d] / sumW);
-        ctlSim = ctlSim + (load - ctlSim) / tauCtl;
-        atlSim = atlSim + (load - atlSim) / tauAtl;
-      }
-
-      const ramp = ctlSim - ctl;
-      const acwr = rolling4Avg > 0 ? tss / rolling4Avg : 1.0;
-
-      if (ramp > 0 && acwr <= 1.3) {
-        best = { tss, ctl: ctlSim, atl: atlSim, ramp, acwr };
-        break;
-      }
-    }
-  }
-
-  // 3. Fallback: einfach "base" nehmen, damit nix völlig ausrastet
-  if (!best) {
-    const tss = Math.round(base / step) * step;
-    let ctlSim = ctl;
-    let atlSim = atl;
-
-    for (let d = 0; d < 7; d++) {
-      const load = tss * (weights[d] / sumW);
-      ctlSim = ctlSim + (load - ctlSim) / tauCtl;
-      atlSim = atlSim + (load - atlSim) / tauAtl;
-    }
-
-    const ramp = ctlSim - ctl;
-    const acwr = rolling4Avg > 0 ? tss / rolling4Avg : 1.0;
-    best = { tss, ctl: ctlSim, atl: atlSim, ramp, acwr };
-  }
-
-  return best;
+/**
+ * Prüft, ob eine Entlastungswoche im Forecast sinnvoll ist.
+ * Regeln:
+ *  - ACWR > 1.3 (ATL / CTL)
+ *  - ATL - CTL > 10
+ */
+function shouldDeload(ctl, atl) {
+  if (ctl <= 0) return false;
+  const acwr = atl / ctl;
+  const fatigueGap = atl - ctl;
+  return acwr > ACWR_SAFE_MAX || fatigueGap > FATIGUE_GAP_THRESHOLD;
 }
 
-//----------------------------------------------------------
-// SIMULATION (CTL-FORECAST, 6 Wochen)
-// CTL soll pro Woche 0.8–1.3 steigen, solange ACWR ok.
-//----------------------------------------------------------
+/**
+ * Max. CTL-Delta, damit ACWR (ATL/CTL) nach der Woche <= ACWR_SAFE_MAX bleibt.
+ *
+ * Modell:
+ *   ΔCTL ≈ (TSS_mean - CTL) / 6
+ *   TSS_mean = CTL + 6d
+ *   ATL_next ≈ TSS_mean
+ *   CTL_next = CTL + d
+ *   ACWR_next = ATL_next / CTL_next = (CTL + 6d) / (CTL + d)
+ *
+ *   (CTL + 6d) / (CTL + d) <= ACWR_SAFE_MAX
+ *   => d_max = ((ACWR_SAFE_MAX - 1) / (6 - ACWR_SAFE_MAX)) * CTL
+ */
+function maxSafeCtlDelta(ctl) {
+  if (ctl <= 0) return CTL_DELTA_MIN;
+  const numerator = (ACWR_SAFE_MAX - 1) * ctl; // z.B. 0.3 * CTL
+  const denominator = 6 - ACWR_SAFE_MAX;       // z.B. 4.7
+  return numerator / denominator;
+}
+
+/**
+ * Berechnet eine Woche mit gegebener CTL-Steigerung.
+ */
+function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
+  // durchschnittlicher TSS pro Tag
+  const tssMean = ctl + 6 * ctlDelta;
+  const weekTss = tssMean * 7;
+
+  const nextCtl = ctl + ctlDelta;
+  const nextAtl = tssMean; // ATL-Zeitkonstante 7 => nähert sich TSS_mean an
+  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
+  const ramp = ctlDelta;
+
+  return {
+    weekType: ctlDelta > 0 ? "BUILD" : "MAINTAIN",
+    ctlDelta,
+    weekTss,
+    tssMean,
+    nextCtl,
+    nextAtl,
+    acwr,
+    ramp
+  };
+}
+
+/**
+ * Berechnet eine Entlastungswoche (Deload):
+ *  - ca. 90 % des Erhaltungsniveaus (CTL)
+ */
+function computeDeloadWeek(ctl, atl) {
+  const tssMean = DELOAD_FACTOR * ctl; // leicht unter Erhaltungslevel
+  const weekTss = tssMean * 7;
+
+  const ctlDelta = (tssMean - ctl) / 6;
+  const nextCtl = ctl + ctlDelta;
+  const nextAtl = tssMean;
+  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
+  const ramp = ctlDelta;
+
+  return {
+    weekType: "DELOAD",
+    ctlDelta,
+    weekTss,
+    tssMean,
+    nextCtl,
+    nextAtl,
+    acwr,
+    ramp
+  };
+}
+
+/**
+ * CTL-FORECAST, 6 Wochen (oder custom):
+ * - start: ctlStart, atlStart (heutiger Montag)
+ * - Ziel: CTL +0.8–1.3/Woche, begrenzt durch ACWR <= 1.3
+ * - automatische Deload-Wochen, wenn Ermüdung zu hoch
+ *
+ * Hinweis:
+ *  - thisWeekTss, last4WeekAvgTss, plan werden aktuell nicht zur
+ *    Verteilung der Last verwendet, sind aber für spätere Erweiterungen
+ *    noch im Funktions-Signatur drin.
+ */
 function simulateForecast(
   ctlStart,
   atlStart,
@@ -340,66 +353,73 @@ function simulateForecast(
   ftp,
   weeks = 6
 ) {
-  const tauCtl = 42;
-  const tauAtl = 7;
-
-  let dayWeights = plan.map(x => (x ? 1 : 0));
-  let sumW = dayWeights.reduce((a, b) => a + b, 0);
-  if (sumW === 0) {
-    dayWeights = [1, 0, 1, 0, 1, 0, 1];
-    sumW = 4;
-  }
-
   let ctl = ctlStart;
   let atl = atlStart;
-
-  // Rolling 4-Wochen Summe approximieren
-  let rollingSum = (last4WeekAvgTss || 0) * 4;
-  if (thisWeekTss && last4WeekAvgTss) {
-    // Schätze: älteste Woche raus, aktuelle Woche rein
-    rollingSum = rollingSum - last4WeekAvgTss + thisWeekTss;
-  }
 
   const progression = [];
 
   for (let w = 1; w <= weeks; w++) {
-    const rollingAvg =
-      rollingSum > 0
-        ? rollingSum / 4
-        : last4WeekAvgTss || thisWeekTss || 100;
+    let weekResult;
 
-    const target = findWeeklyTargetByCtl(ctl, atl, rollingAvg, dayWeights);
+    // 1) Prüfen, ob für diese Woche eine Deload sinnvoll ist
+    if (shouldDeload(ctl, atl)) {
+      weekResult = computeDeloadWeek(ctl, atl);
+    } else {
+      // 2) Aufbauwoche: Ziel-CTL-Delta innerhalb 0.8–1.3,
+      //    zusätzlich durch ACWR-Limit begrenzt.
+      const dMaxSafe = maxSafeCtlDelta(ctl);
 
-    // CTL/ATL auf Forecast-Werte setzen
-    ctl = target.ctl;
-    atl = target.atl;
+      let targetDelta = Math.min(CTL_DELTA_MAX, dMaxSafe);
 
-    // RollingSum updaten (nächste ACWR-Schätzung)
-    const newRollingAvg = rollingSum > 0 ? rollingSum / 4 : rollingAvg;
-    rollingSum = newRollingAvg * 3 + target.tss;
+      // Wenn dMaxSafe < 0.8, dann so hoch wie sicher möglich,
+      // auch wenn wir unter der Wunsch-Steigerung bleiben.
+      if (dMaxSafe < CTL_DELTA_MIN) {
+        targetDelta = dMaxSafe;
+      } else if (targetDelta < CTL_DELTA_MIN) {
+        targetDelta = CTL_DELTA_MIN;
+      }
 
-    const ramp = target.ramp;
-    const acwr = target.acwr;
+      // Edge Case: falls irgendwas schief geht (NaN, negativ etc.)
+      if (!isFinite(targetDelta) || targetDelta <= 0) {
+        // Erhaltungswoche
+        targetDelta = 0;
+      }
 
-    const fatigue = classifyWeek(ctl, atl, ramp);
+      weekResult = computeWeekFromCtlDelta(ctl, atl, targetDelta);
+    }
 
-    const markers = computeMarkers(units28, hrMax, ftp, ctl, atl);
-    // überschreibe Marker-ACWR mit dem geplanten ACWR aus TSS-Sicht
-    markers.acwr = acwr;
+    // CTL/ATL updaten
+    ctl = weekResult.nextCtl;
+    atl = weekResult.nextAtl;
 
-    const scores = computeScores(markers);
-    const phase = recommendPhase(scores, fatigue.state);
-
+    // Montag dieser zukünftigen Woche
     const future = new Date(mondayDate);
     future.setUTCDate(future.getUTCDate() + 7 * w);
     const mondayStr = future.toISOString().slice(0, 10);
 
+    // Ermüdungszustand und Marker auf Basis des neuen CTL/ATL
+    const fatigue = classifyWeek(ctl, atl, weekResult.ramp);
+
+    const markers = computeMarkers(units28, hrMax, ftp, ctl, atl);
+    // ACWR aus Forecast überschreiben
+    markers.acwr = weekResult.acwr;
+
+    const scores = computeScores(markers);
+    const phase = recommendPhase(scores, fatigue.state);
+
+    const weeklyTarget = Math.round(weekResult.weekTss);
+
     progression.push({
       weekOffset: w,
       monday: mondayStr,
-      weeklyTarget: Math.round(target.tss),
+      weeklyTarget,
       weekState: fatigue.state,
       phase,
+      weekType: weekResult.weekType, // BUILD / MAINTAIN / DELOAD
+      ctl: ctl,
+      atl: atl,
+      ramp: weekResult.ramp,
+      acwr: weekResult.acwr,
       markers,
       scores
     });
@@ -449,7 +469,7 @@ async function handle() {
     const hrMax = well.hrMax ?? 173;
     const ftp = well.ftp ?? 250;
 
-    // Start-Weekly-Target: entweder aus Wellness oder aus Daily
+    // Start-Weekly-Target: entweder aus Wellness oder grob CTL*7
     const dailyGuess = ctl > 0 ? ctl : 20;
     const startTarget =
       well[WEEKLY_TARGET_FIELD] ?? Math.round(dailyGuess * 7);
@@ -517,13 +537,13 @@ async function handle() {
       return d >= start28Str && d <= mondayStr;
     });
 
-    // Marker / Scores für jetzt (optional)
+    // Marker / Scores für jetzt
     const markersNow = computeMarkers(units28, hrMax, ftp, ctl, atl);
     const scoresNow = computeScores(markersNow);
     const phaseNow = recommendPhase(scoresNow, fatigueNow.state);
 
-    // Forecast (nur Simulation, kein PUT): CTL jede Woche ~0.8–1.3 rauf,
-    // solange ACWR in 0.8–1.3 bleibt (sofern möglich).
+    // Forecast (nur Simulation, kein PUT)
+    // Nutzt jetzt die neue CTL-/ATL-Logik mit Deload-Wochen.
     const progression = simulateForecast(
       ctl,
       atl,
@@ -575,7 +595,8 @@ export default {
     return handle();
   },
   async scheduled(event, env, ctx) {
-    // Kannst du später für nächtlichen Auto-Run nehmen
+    // Auto-Run (z.B. 1x pro Woche per Cron)
     ctx.waitUntil(handle());
   }
 };
+
