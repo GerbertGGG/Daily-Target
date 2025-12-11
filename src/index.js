@@ -3,8 +3,9 @@ const API_KEY = "API_KEY";
 const API_SECRET = "1xg1v04ym957jsqva8720oo01";
 const ATHLETE_ID = "i105857";
 
-const WEEKLY_TARGET_FIELD = "WochenzielTSS";
-const PLAN_FIELD = "WochenPlan";
+const WEEKLY_TARGET_FIELD = "WochenplanTSS"; // Wochen-TSS-Ziel ins Wellnessfeld
+const PLAN_FIELD = "WochenPlan";             // Phase (Grundlage/Aufbau/Spezifisch)
+const COMMENT_FIELD = "comment";             // Coaching-Notiz ins Kommentarfeld
 
 const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
@@ -242,6 +243,40 @@ function decidePhaseFromRunDecoupling(medianDrift) {
   return "Spezifisch";
 }
 
+// ---------------- Coaching-Notiz ----------------
+
+function buildCommentText({ phase, weeklyTargetTss, ctl, atl, acwr, decStats }) {
+  const acwrStr =
+    acwr != null && isFinite(acwr) ? acwr.toFixed(2) : "k.A.";
+  const driftStr =
+    decStats.medianDrift != null && isFinite(decStats.medianDrift)
+      ? (decStats.medianDrift * 100).toFixed(1) + "%"
+      : "k.A.";
+
+  let phaseReason = "";
+  if (phase === "Grundlage") {
+    phaseReason =
+      "Fokus auf solide GA-Läufe: der PA/HR-Drift ist noch > 7% oder die Datenlage ist dünn. Ziel: Ökonomisierung und stabile Basis.";
+  } else if (phase === "Aufbau") {
+    phaseReason =
+      "PA/HR-Drift ca. 4–7%: deine Grundlage ist ordentlich, daher leicht erhöhte Belastung und mehr strukturierte Reize.";
+  } else if (phase === "Spezifisch") {
+    phaseReason =
+      "PA/HR-Drift < 4%: sehr stabile Grundlage, daher mehr wettkampfspezifische Einheiten bei gut kontrollierter Gesamtlast.";
+  }
+
+  return [
+    `Coaching-Notiz`,
+    ``,
+    `• Phase: ${phase}`,
+    `• Wochenziel TSS: ~${weeklyTargetTss}`,
+    `• Aktuelle Last: CTL ${ctl.toFixed(1)}, ATL ${atl.toFixed(1)}, ACWR ${acwrStr}`,
+    `• GA-Qualität: medianer PA/HR-Drift ${driftStr} (${decStats.gaWithDrift}/${decStats.gaCount} GA-Läufe mit Drift-Wert)`,
+    ``,
+    phaseReason
+  ].join("\n");
+}
+
 // ---------------- MAIN ----------------
 
 async function handle(dryRun = true) {
@@ -250,11 +285,14 @@ async function handle(dryRun = true) {
 
     const today = new Date().toISOString().slice(0, 10);
     const todayObj = new Date(today + "T00:00:00Z");
+
+    // Montag der aktuellen Woche (ISO: Montag = 0)
     const offset = (todayObj.getUTCDay() + 6) % 7;
     const monday = new Date(todayObj);
     monday.setUTCDate(monday.getUTCDate() - offset);
     const mondayStr = monday.toISOString().slice(0, 10);
 
+    // Aktuellen Wellness-Eintrag (heute) laden (für CTL/ATL etc.)
     const wRes = await fetch(
       `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${today}`,
       { headers: { Authorization: authHeader } }
@@ -267,6 +305,7 @@ async function handle(dryRun = true) {
     const atl = well.atl ?? 0;
     const hrMaxGlobal = well.hrMax ?? well.max_hr ?? 173;
 
+    // Letzte 28 Tage Aktivitäten laden
     const start28 = new Date(monday);
     start28.setUTCDate(start28.getUTCDate() - 28);
     const start28Str = start28.toISOString().slice(0, 10);
@@ -297,11 +336,23 @@ async function handle(dryRun = true) {
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
     const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
 
+    const commentText = buildCommentText({
+      phase,
+      weeklyTargetTss,
+      ctl,
+      atl,
+      acwr: thisWeekPlan.acwr,
+      decStats
+    });
+
+    // Am Wochen-Montag schreiben
     if (!dryRun) {
       const body = {
         [WEEKLY_TARGET_FIELD]: weeklyTargetTss,
-        [PLAN_FIELD]: phase
+        [PLAN_FIELD]: phase,
+        [COMMENT_FIELD]: commentText
       };
+
       const putRes = await fetch(
         `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`,
         {
@@ -331,6 +382,7 @@ async function handle(dryRun = true) {
         ctlDelta: thisWeekPlan.ctlDelta,
         acwr: thisWeekPlan.acwr,
         phase,
+        comment: commentText,
         runDecoupling: {
           ...decStats,
           medianDriftPercent:
@@ -349,11 +401,11 @@ async function handle(dryRun = true) {
 
 export default {
   async fetch(request, env, ctx) {
-    // HTTP = nur anschauen (keine Änderungen schreiben)
+    // HTTP-Aufruf: nur anschauen, nichts schreiben
     return handle(true);
   },
   async scheduled(event, env, ctx) {
-    // Cron = echte Schreibläufe
+    // Cron-Job: schreibt WochenplanTSS, Phase und Coaching-Kommentar
     ctx.waitUntil(handle(false));
   }
 };
