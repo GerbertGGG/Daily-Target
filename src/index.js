@@ -194,72 +194,76 @@ async function handle(env){
     const today = now.toISOString().slice(0,10);
     const todayDate = new Date(today+"T00:00:00Z");
     const jsDay = todayDate.getUTCDay();
+    const isMonday = (jsDay === 1); // Montag = 1
     const offset = jsDay===0?6:jsDay-1;
     const mondayDate = new Date(todayDate);
     mondayDate.setUTCDate(mondayDate.getUTCDate()-offset);
 
+    // Wellness-Daten abrufen
     const wellnessRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{headers:{Authorization:authHeader}});
-    if(!wellnessRes.ok){const text = await wellnessRes.text(); return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});}
+    if(!wellnessRes.ok){
+      const text = await wellnessRes.text();
+      return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});
+    }
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl, atl = wellness.atl, rampRate = wellness.rampRate??0;
     if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
-    const {state: weekState, tsb} = classifyWeek(ctl, atl, rampRate);
-    const dailyTargetBase = computeDailyTarget(ctl, atl);
+    const {state: weekState} = classifyWeek(ctl, atl, rampRate);
 
-    // --- Schreibe Tagesziel (TageszielTSS) & aktuellen WochenPlan falls gewünscht ---
-    try{
+    // --- Nur Montag: Wochenziel, Phase & Kommentar schreiben ---
+    if(isMonday){
+      const dailyTargetBase = computeDailyTarget(ctl, atl);
       const currentMarkers = computeMarkers(wellness.units??[]);
       const phaseNow = recommendWeekPhase(currentMarkers, weekState);
       const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+
       const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`;
 
-      // Erstelle erklärenden Kommentar, der genau beschreibt, wie das Tagesziel berechnet wurde
-const tsb = ctl - atl;
-const tsbClamped = Math.max(-20, Math.min(20, tsb));
-const k = 0.05;
-const dailyCalc = Math.round(Math.max(0, Math.min(ctl * 1.5, ctl * (1 + k * tsbClamped))));
+      const commentExplanation = `Wochenziel TSS (Stand: ${today}):
+- Phase: ${phaseNow}
+- Simulierter Zustand: ${weekState}
+- Wochenziel: ${weeklyTargetStart} TSS
+Hinweis: Tagesziele werden nur montags aktualisiert.`;
 
-const commentExplanation = `Berechnung Tagesziel TSS (Stand: ${today}):
-` +
-  `- CTL (Langzeitbelastung): ${ctl}
-` +
-  `- ATL (Kurzzeitbelastung): ${atl}
-` +
-  `- TSB = CTL - ATL = ${tsb} (geclamped: ${tsbClamped})
-` +
-  `- Formel: daily = round( max(0, min(CTL*1.5, CTL * (1 + k * tsbClamped))) ) mit k=${k}
-` +
-  `- Ergebnis (berechnet): ${dailyCalc} TSS
-` +
-  `- Verbleibendes Wochen-Rest (weeklyTarget ${weeklyTargetStart} - erledigt ${doneTss}): ${remaining} TSS
-` +
-  `Hinweis: Tagesziel basiert auf CTL/ATL Dynamik. Wenn du die Einheit(en) heute machst, wird der Rest automatisch angepasst.`;
+      const payloadToday = {
+        id: today,
+        [WEEKLY_TARGET_FIELD]: weeklyTargetStart,
+        [INTERVALS_PLAN_FIELD]: dayPlanText,
+        comments: commentExplanation
+      };
 
-const payloadToday = {
-  id: today,
-  [INTERVALS_TARGET_FIELD]: Math.round(dailyTargetBase),
-  [INTERVALS_PLAN_FIELD]: `Rest ${remaining}`,
-  comments: commentExplanation
-};
+      try{
+        const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
+          method: "PUT",
+          headers: {"Content-Type": "application/json", Authorization: authHeader},
+          body: JSON.stringify(payloadToday)
+        });
+        if(!updateRes.ok){ 
+          const txt = await updateRes.text(); 
+          console.error("Failed to update Monday's wellness:", updateRes.status, txt); 
+        } else { 
+          console.log("Updated weekly target, phase, and comment (Monday)"); 
+        }
+      } catch(e){ console.error("Error updating Monday's target/comment:", e); }
 
-      const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
-        method: "PUT",
-        headers: {"Content-Type": "application/json", Authorization: authHeader},
-        body: JSON.stringify(payloadToday)
-      });
-      if(!updateRes.ok){ const txt = await updateRes.text(); console.error("Failed to update today's wellness:", updateRes.status, txt); }
-      else { console.log("Updated today's Tagesziel and WochenPlan"); }
-    }catch(e){ console.error("Error writing today's target/plan:", e); }
+      // --- 6-Wochen Simulation ebenfalls nur Montag ---
+      const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
+      const historicalMarkers = wellness.historicalMarkers??[];
+      const weeklyProgression = await simulatePlannedWeeks(ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers);
 
-    const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
-    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
-    const historicalMarkers = wellness.historicalMarkers??[];
+      return new Response(JSON.stringify({ monday:true, weeklyProgression },null,2),{status:200});
+    } else {
+      // Unter der Woche: keine Berechnung
+      console.log("Heute ist nicht Montag – keine Berechnungen oder Kommentare.");
+      return new Response(JSON.stringify({ monday:false, message:"Keine Berechnungen unter der Woche" },null,2),{status:200});
+    }
 
-    const weeklyProgression = await simulatePlannedWeeks(ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers);
-
-    return new Response(JSON.stringify({ dryRun:true, thisWeek:{monday:today, weeklyTarget:weeklyTargetStart, alreadyDone:0, remaining:weeklyTargetStart}, weeklyProgression },null,2),{status:200});
-  }catch(err){console.error("Unexpected error:",err); return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});}
+  } catch(err){
+    console.error("Unexpected error:",err); 
+    return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});
+  }
 }
+
 
 // ------------------- EXPORT -------------------
 export default { async fetch(request, env, ctx){return handle(env);}, async scheduled(event, env, ctx){ctx.waitUntil(handle(env));} };
