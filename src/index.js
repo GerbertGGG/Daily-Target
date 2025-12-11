@@ -216,37 +216,87 @@ async function handle(env){
     const now = new Date();
     const today = now.toISOString().slice(0,10);
     const todayDate = new Date(today+"T00:00:00Z");
-    const jsDay = todayDate.getUTCDay();
-    const isMonday = (jsDay === 1);
-    const writeToIntervals = true;
-
+    const jsDay = todayDate.getUTCDay(); // 0=So,1=Mo...
     const offset = jsDay===0?6:jsDay-1;
     const mondayDate = new Date(todayDate);
     mondayDate.setUTCDate(mondayDate.getUTCDate()-offset);
 
     const wellnessRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{headers:{Authorization:authHeader}});
-    if(!wellnessRes.ok){ const text = await wellnessRes.text(); return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});}
+    if(!wellnessRes.ok){const text = await wellnessRes.text(); return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});}
     const wellness = await wellnessRes.json();
     const ctl = wellness.ctl, atl = wellness.atl, rampRate = wellness.rampRate??0;
     if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
-    const {state: weekState} = classifyWeek(ctl, atl, rampRate);
 
-    // Tagesziel nicht schreiben, nur Simulation der Wochen
-    const dailyTargetBase = computeDailyTarget(ctl, atl);
-    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+    const {state: weekState, tsb} = classifyWeek(ctl, atl, rampRate);
+
     const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
+    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(computeDailyTarget(ctl, atl)*7);
     const historicalMarkers = wellness.historicalMarkers??[];
 
+    // --- Intelligente Wochenzielberechnung für Montag ---
+    const mondayIsToday = jsDay === 1;
+    let thisWeekTarget = weeklyTargetStart;
+    let phaseNow = "Aufbau";
+    let commentNow = "";
+
+    if(mondayIsToday){
+      // Schätze DC/PDC-Trend
+      const recentMarkers = historicalMarkers.slice(-4);
+      let dcTrend=0, pdcTrend=0;
+      for(let i=1;i<recentMarkers.length;i++){
+        dcTrend += (recentMarkers[i].decupling - recentMarkers[i-1].decupling)/recentMarkers.length;
+        pdcTrend += (recentMarkers[i].pdc - recentMarkers[i-1].pdc)/recentMarkers.length;
+      }
+      const simDecoupling = (historicalMarkers[historicalMarkers.length-1]?.decupling ?? 3) + dcTrend + 0.05*rampRate;
+      const simPDC = (historicalMarkers[historicalMarkers.length-1]?.pdc ?? 0.95) + pdcTrend + 0.01*rampRate;
+      const estimatedMarkers = { ...historicalMarkers[historicalMarkers.length-1], decupling: simDecoupling, pdc: simPDC };
+
+      // Ramp + Trend Faktoren
+      let rampFactor=1.0;
+      if(tsb>=5 && weekState==="Erholt") rampFactor=1.12;
+      else if(tsb>0 && weekState==="Normal") rampFactor=1.07;
+      else if(tsb<-5 || weekState==="Müde") rampFactor=0.92;
+
+      const trendFactor = 1 + Math.min(0.05, dcTrend); 
+      thisWeekTarget = Math.round(weeklyTargetStart * rampFactor * trendFactor / 5) * 5;
+      thisWeekTarget = Math.max(weeklyTargetStart*0.85, Math.min(weeklyTargetStart*1.15, thisWeekTarget));
+
+      phaseNow = recommendWeekPhase(estimatedMarkers, weekState);
+
+      commentNow = `Woche ${today} | Phase: ${phaseNow} | Zustand: ${weekState} | Wochenziel: ${thisWeekTarget} TSS
+TSB=${tsb.toFixed(1)}, RampSim=${rampRate.toFixed(2)}, DC/PDC-Trend=${dcTrend.toFixed(2)}/${pdcTrend.toFixed(2)}`;
+      
+      // Update in Intervals.icu
+      const payloadToday = {
+        id: today,
+        [WEEKLY_TARGET_FIELD]: thisWeekTarget,
+        [INTERVALS_PLAN_FIELD]: `Rest ${thisWeekTarget} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`,
+        comments: commentNow
+      };
+      try{
+        const resUpdate = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
+          method:"PUT",
+          headers:{"Content-Type":"application/json", Authorization:authHeader},
+          body:JSON.stringify(payloadToday)
+        });
+        if(!resUpdate.ok){ const txt = await resUpdate.text(); console.error("Failed to update Monday:", resUpdate.status, txt);}
+      }catch(e){console.error("Error updating Monday:", e);}
+    }
+
+    // --- 6-Wochen Prognose täglich ---
     const weeklyProgression = await simulatePlannedWeeks(
-      ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers, writeToIntervals
+      ctl, atl, weekState, thisWeekTarget, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers, true
     );
 
-    return new Response(JSON.stringify({ monday:isMonday, weeklyProgression },null,2),{status:200});
-  } catch(err){
-    console.error("Unexpected error:",err); 
-    return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});
-  }
+    return new Response(JSON.stringify({
+      monday: mondayIsToday,
+      thisWeek:{target:thisWeekTarget, phase:phaseNow, comment:commentNow},
+      weeklyProgression
+    }, null, 2), {status:200});
+
+  }catch(err){console.error("Unexpected error:",err); return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});}
 }
+
 
 
 
