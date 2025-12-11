@@ -184,118 +184,82 @@ async function simulatePlannedWeeks(ctlStart, atlStart, weekStateStart, weeklyTa
 }
 
 // ------------------- Hauptlogik -------------------
-// ------------------- Hauptlogik (korrigierte Version) -------------------
-async function handle(env) {
-  try {
+async function handle(env){
+  try{
     const apiKey = INTERVALS_API_KEY, athleteId = INTERVALS_ATHLETE_ID;
-    if (!apiKey || !athleteId) return new Response("Missing config", { status: 500 });
-    const authHeader = "Basic " + btoa(`API_KEY:${apiKey}`);
+    if(!apiKey||!athleteId) return new Response("Missing config",{status:500});
+    const authHeader = "Basic "+btoa(`API_KEY:${apiKey}`);
 
     const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const todayDate = new Date(today + "T00:00:00Z");
+    const today = now.toISOString().slice(0,10);
+    const todayDate = new Date(today+"T00:00:00Z");
     const jsDay = todayDate.getUTCDay();
-    const offset = jsDay === 0 ? 6 : jsDay - 1;
+    const offset = jsDay===0?6:jsDay-1;
     const mondayDate = new Date(todayDate);
-    mondayDate.setUTCDate(mondayDate.getUTCDate() - offset);
+    mondayDate.setUTCDate(mondayDate.getUTCDate()-offset);
 
-    // Hole Wellness für heute
-    const wellnessRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`, { headers: { Authorization: authHeader } });
-    if (!wellnessRes.ok) {
-      const text = await wellnessRes.text();
-      return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`, { status: 500 });
-    }
+    const wellnessRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{headers:{Authorization:authHeader}});
+    if(!wellnessRes.ok){const text = await wellnessRes.text(); return new Response(`Failed to fetch wellness today: ${wellnessRes.status} ${text}`,{status:500});}
     const wellness = await wellnessRes.json();
-
-    const ctl = wellness.ctl, atl = wellness.atl, rampRate = wellness.rampRate ?? 0;
-    if (ctl == null || atl == null) return new Response("No ctl/atl data", { status: 200 });
-
-    const { state: weekState, tsb } = classifyWeek(ctl, atl, rampRate);
+    const ctl = wellness.ctl, atl = wellness.atl, rampRate = wellness.rampRate??0;
+    if(ctl==null||atl==null) return new Response("No ctl/atl data",{status:200});
+    const {state: weekState, tsb} = classifyWeek(ctl, atl, rampRate);
     const dailyTargetBase = computeDailyTarget(ctl, atl);
 
-    // --- Schreibe Tagesziel (TageszielTSS) & aktuellen Tages-Plan mit verbleibendem Rest ---
-    // Berechne weeklyTargetStart (aus wellness oder berechnet)
-    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD] ?? Math.round(dailyTargetBase * 7);
+    // --- Schreibe Tagesziel (TageszielTSS) & aktuellen WochenPlan falls gewünscht ---
+    try{
+      const currentMarkers = computeMarkers(wellness.units??[]);
+      const phaseNow = recommendWeekPhase(currentMarkers, weekState);
+      const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+      const dayPlanText = `Rest ${weeklyTargetStart} | ${stateEmoji(weekState)} ${weekState} | Phase: ${phaseNow}`;
 
-    // Berechne Montag/Sonntag der laufenden Woche (UTC-basiert, wie zuvor)
-    const todayDateObj = new Date(today + "T00:00:00Z");
-    const jsDay2 = todayDateObj.getUTCDay();
-    const offset2 = jsDay2 === 0 ? 6 : jsDay2 - 1;
-    const mondayDateObj = new Date(todayDateObj);
-    mondayDateObj.setUTCDate(mondayDateObj.getUTCDate() - offset2);
-    const mondayStr = mondayDateObj.toISOString().slice(0, 10);
-    const sundayDateObj = new Date(mondayDateObj);
-    sundayDateObj.setUTCDate(sundayDateObj.getUTCDate() + 6);
-    const sundayStr = sundayDateObj.toISOString().slice(0, 10);
+      // Erstelle erklärenden Kommentar, der genau beschreibt, wie das Tagesziel berechnet wurde
+const tsb = ctl - atl;
+const tsbClamped = Math.max(-20, Math.min(20, tsb));
+const k = 0.05;
+const dailyCalc = Math.round(Math.max(0, Math.min(ctl * 1.5, ctl * (1 + k * tsbClamped))));
 
-    // Hole Aktivitäten dieser Woche und summiere schon erledigte TSS (defensiv)
-    let doneTss = 0;
-    try {
-      const actsRes = await fetch(`${BASE_URL}/athlete/${athleteId}/activities?from=${mondayStr}&to=${sundayStr}`, {
-        headers: { Authorization: authHeader }
-      });
-      if (actsRes.ok) {
-        const actsJson = await actsRes.json();
-        const activities = actsJson.activities ?? actsJson.data ?? [];
-        for (const a of activities) {
-          // best-effort: unterschiedliche Feldnamen unterstützen
-          const aDate = (a.start_date_local || a.start_date || a.date || "").slice(0, 10);
-          if (!aDate) continue;
-          if (aDate > today) continue; // zukünftige Einträge ignorieren
-          const t = a.tss ?? a.tss_total ?? (a.metrics && a.metrics.tss) ?? 0;
-          doneTss += (typeof t === "number" ? t : Number(t) || 0);
-        }
-      } else {
-        console.error("Failed to fetch activities for week (for doneTss):", actsRes.status, await actsRes.text());
-      }
-    } catch (e) {
-      console.error("Error fetching activities for doneTss:", e);
-    }
+const commentExplanation = `Berechnung Tagesziel TSS (Stand: ${today}):
+` +
+  `- CTL (Langzeitbelastung): ${ctl}
+` +
+  `- ATL (Kurzzeitbelastung): ${atl}
+` +
+  `- TSB = CTL - ATL = ${tsb} (geclamped: ${tsbClamped})
+` +
+  `- Formel: daily = round( max(0, min(CTL*1.5, CTL * (1 + k * tsbClamped))) ) mit k=${k}
+` +
+  `- Ergebnis (berechnet): ${dailyCalc} TSS
+` +
+  `- Verbleibendes Wochen-Rest (weeklyTarget ${weeklyTargetStart} - erledigt ${doneTss}): ${remaining} TSS
+` +
+  `Hinweis: Tagesziel basiert auf CTL/ATL Dynamik. Wenn du die Einheit(en) heute machst, wird der Rest automatisch angepasst.`;
 
-    const remaining = Math.max(0, Math.round(weeklyTargetStart - doneTss));
+const payloadToday = {
+  id: today,
+  [INTERVALS_TARGET_FIELD]: Math.round(dailyTargetBase),
+  [INTERVALS_PLAN_FIELD]: `Rest ${remaining}`,
+  comments: commentExplanation
+};
 
-    // Erstelle Plan-Text für den Tag: nur "Rest X" (Phase nur am Montag in Wochen-Plan/Kommentare)
-    const dayPlanText = `Rest ${remaining}`;
-
-    // Schreibe Tagesziel und Tages-Plan in today's wellness
-    try {
-      const payloadToday = {
-        id: today,
-        [INTERVALS_TARGET_FIELD]: Math.round(dailyTargetBase),
-        [INTERVALS_PLAN_FIELD]: dayPlanText
-      };
-      const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`, {
+      const updateRes = await fetch(`${BASE_URL}/athlete/${athleteId}/wellness/${today}`,{
         method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        headers: {"Content-Type": "application/json", Authorization: authHeader},
         body: JSON.stringify(payloadToday)
       });
-      if (!updateRes.ok) {
-        const txt = await updateRes.text();
-        console.error("Failed to update today's wellness (target/plan):", updateRes.status, txt);
-      } else {
-        console.log("Updated today's Tagesziel and TagesPlan (Rest):", payloadToday);
-      }
-    } catch (e) {
-      console.error("Error writing today's target/plan (rest):", e);
-    }
+      if(!updateRes.ok){ const txt = await updateRes.text(); console.error("Failed to update today's wellness:", updateRes.status, txt); }
+      else { console.log("Updated today's Tagesziel and WochenPlan"); }
+    }catch(e){ console.error("Error writing today's target/plan:", e); }
 
-    // Restliche Simulation (6 Wochen) wie gehabt
-    const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD] ?? DEFAULT_PLAN_STRING);
-    const historicalMarkers = wellness.historicalMarkers ?? [];
+    const planSelected = parseTrainingDays(wellness[DAILY_TYPE_FIELD]??DEFAULT_PLAN_STRING);
+    const weeklyTargetStart = wellness[WEEKLY_TARGET_FIELD]??Math.round(dailyTargetBase*7);
+    const historicalMarkers = wellness.historicalMarkers??[];
+
     const weeklyProgression = await simulatePlannedWeeks(ctl, atl, weekState, weeklyTargetStart, mondayDate, planSelected, authHeader, athleteId, 6, historicalMarkers);
 
-    return new Response(JSON.stringify({
-      dryRun: true,
-      thisWeek: { monday: mondayStr, weeklyTarget: weeklyTargetStart, alreadyDone: Math.round(doneTss), remaining: remaining },
-      weeklyProgression
-    }, null, 2), { status: 200 });
-
-  } catch (err) {
-    console.error("Unexpected error:", err);
-    return new Response("Unexpected error: " + (err.stack ?? String(err)), { status: 500 });
-  }
+    return new Response(JSON.stringify({ dryRun:true, thisWeek:{monday:today, weeklyTarget:weeklyTargetStart, alreadyDone:0, remaining:weeklyTargetStart}, weeklyProgression },null,2),{status:200});
+  }catch(err){console.error("Unexpected error:",err); return new Response("Unexpected error: "+(err.stack??String(err)),{status:500});}
 }
-
 
 // ------------------- EXPORT -------------------
 export default { async fetch(request, env, ctx){return handle(env);}, async scheduled(event, env, ctx){ctx.waitUntil(handle(env));} };
