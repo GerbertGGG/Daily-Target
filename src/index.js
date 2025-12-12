@@ -13,6 +13,10 @@ const ACWR_SOFT_MAX = 1.3;
 const ACWR_HARD_MAX = 1.5;
 const DELOAD_FACTOR = 0.9;
 
+// Phase Locking / Hysterese
+const PHASE_SWITCH_STREAK = 2; // wie viele gleiche Kandidaten hintereinander nötig
+const PHASE_META_TAG = "phase_meta";
+
 // ---------------- CTL / ATL / ACWR ----------------
 
 function getAtlMax(ctl) {
@@ -183,9 +187,7 @@ async function computeDriftFromStream(activityId, authHeader) {
     const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
     const res = await fetch(url, { headers: { Authorization: authHeader } });
 
-    if (!res.ok) {
-      return null;
-    }
+    if (!res.ok) return null;
 
     const streams = await res.json();
     const getStream = (type) => {
@@ -240,45 +242,265 @@ async function extractRunDecouplingStats(activities, hrMaxGlobal, authHeader) {
   };
 }
 
-function decidePhaseFromRunDecoupling(medianDrift) {
-  if (medianDrift == null) return "Grundlage";
-  if (medianDrift > 0.07) return "Grundlage";
-  if (medianDrift > 0.04) return "Aufbau";
-  return "Spezifisch";
+// ---------------- GA Effizienz (Speed/HR) + Trend ----------------
+
+function extractGaEfficiency(a, hrMaxGlobal) {
+  const athleteMax = a.athlete_max_hr ?? hrMaxGlobal ?? null;
+  if (!athleteMax || athleteMax <= 0) return null;
+
+  const hrAvg = a.average_heartrate ?? null;
+  const duration = a.moving_time ?? a.elapsed_time ?? a.icu_recording_time ?? 0;
+
+  // Intervals liefert oft average_speed (m/s)
+  const vAvg = a.average_speed ?? a.avg_speed ?? null;
+
+  if (!hrAvg || !vAvg || !duration) return null;
+
+  const relAvg = hrAvg / athleteMax;
+  if (relAvg < 0.70 || relAvg > 0.82) return null;
+
+  return vAvg / hrAvg; // m/s pro bpm
+}
+
+function computeGaEfficiencyTrend(activities, hrMaxGlobal) {
+  const now = Date.now();
+  const d14 = 14 * 24 * 3600 * 1000;
+
+  const effLast14 = [];
+  const effPrev14 = [];
+
+  for (const a of activities) {
+    if (!isGaRunForDecoupling(a, hrMaxGlobal)) continue;
+
+    const eff = extractGaEfficiency(a, hrMaxGlobal);
+    if (eff == null) continue;
+
+    const ts = a.start_date ?? a.start_time ?? a.start ?? null;
+    const t = ts ? new Date(ts).getTime() : null;
+    if (!t || !isFinite(t)) continue;
+
+    if (now - t <= d14) effLast14.push(eff);
+    else if (now - t <= 2 * d14) effPrev14.push(eff);
+  }
+
+  const mLast = median(effLast14);
+  const mPrev = median(effPrev14);
+
+  const trend = (mLast != null && mPrev != null && mPrev > 0)
+    ? (mLast - mPrev) / mPrev
+    : null;
+
+  return {
+    medEffLast14: mLast,
+    medEffPrev14: mPrev,
+    effTrend: trend,
+    nLast14: effLast14.length,
+    nPrev14: effPrev14.length
+  };
+}
+
+// ---------------- Wellness-Serie (CTL Trend/Stabilität) ----------------
+
+async function fetchWellnessSeries(authHeader, startDateStr, endDateStr) {
+  const url = `${BASE_URL}/athlete/${ATHLETE_ID}/wellness?oldest=${startDateStr}&newest=${endDateStr}`;
+  const res = await fetch(url, { headers: { Authorization: authHeader } });
+
+  if (res.ok) {
+    const raw = await res.json();
+    const rows = Array.isArray(raw) ? raw : (raw?.wellness ?? []);
+    return rows;
+  }
+
+  // Fallback: tageweise
+  const out = [];
+  const start = new Date(startDateStr + "T00:00:00Z");
+  const end = new Date(endDateStr + "T00:00:00Z");
+  for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    const ds = d.toISOString().slice(0, 10);
+    const r = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${ds}`, {
+      headers: { Authorization: authHeader }
+    });
+    if (r.ok) out.push(await r.json());
+  }
+  return out;
+}
+
+function computeCtlStability(wellnessRows) {
+  const ctlVals = wellnessRows
+    .map(w => w.ctl)
+    .filter(v => typeof v === "number" && isFinite(v));
+
+  if (ctlVals.length < 7) return { ctlSlope: null, ctlStd: null };
+
+  const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+  const first = ctlVals.slice(0, 3);
+  const last = ctlVals.slice(-3);
+
+  const slope = (avg(last) - avg(first)) / Math.max(1, ctlVals.length - 1);
+
+  const mean = avg(ctlVals);
+  const varr = ctlVals.reduce((a, b) => a + (b - mean) * (b - mean), 0) / ctlVals.length;
+  const std = Math.sqrt(varr);
+
+  return { ctlSlope: slope, ctlStd: std };
+}
+
+// ---------------- Phase Entscheidung (Signale) ----------------
+
+function decidePhaseFromSignals({ medianDrift, effTrend, ctlSlope }) {
+  // Baseline aus Drift
+  let phase;
+  if (medianDrift == null) phase = "Grundlage";
+  else if (medianDrift > 0.07) phase = "Grundlage";
+  else if (medianDrift > 0.04) phase = "Aufbau";
+  else phase = "Spezifisch";
+
+  // Wenn Effizienz nicht (mehr) besser wird -> nicht zu früh hoch
+  if (phase === "Aufbau" || phase === "Spezifisch") {
+    if (effTrend != null && effTrend < 0.01) {
+      phase = "Aufbau";
+      if (medianDrift != null && medianDrift > 0.07) phase = "Grundlage";
+    }
+  }
+
+  // Wenn CTL gerade stark steigt -> nicht in spezifisch/peak
+  if (phase === "Spezifisch") {
+    if (ctlSlope != null && ctlSlope > 0.25) phase = "Aufbau";
+  }
+
+  return phase;
+}
+
+// ---------------- Phase Meta / Hysterese ----------------
+
+function phaseOrder(p) {
+  // höher = "weiter"
+  if (p === "Grundlage") return 1;
+  if (p === "Aufbau") return 2;
+  if (p === "Spezifisch") return 3;
+  return 0;
+}
+
+function parsePhaseMeta(commentText) {
+  if (!commentText || typeof commentText !== "string") return null;
+  const re = new RegExp(`<!--\\s*${PHASE_META_TAG}:(\\{[\\s\\S]*?\\})\\s*-->`);
+  const m = commentText.match(re);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+}
+
+function stripPhaseMeta(commentText) {
+  if (!commentText || typeof commentText !== "string") return commentText ?? "";
+  const re = new RegExp(`\\n?<!--\\s*${PHASE_META_TAG}:[\\s\\S]*?-->\\s*`, "g");
+  return commentText.replace(re, "").trimEnd();
+}
+
+function appendPhaseMeta(commentText, meta) {
+  const clean = stripPhaseMeta(commentText);
+  const tag = `<!--${PHASE_META_TAG}:${JSON.stringify(meta)}-->`;
+  return (clean ? clean + "\n" : "") + tag;
+}
+
+/**
+ * Hysterese:
+ * - candidatePhase wird gezählt (streak)
+ * - phase wechselt nur, wenn candidatePhase streak >= PHASE_SWITCH_STREAK
+ */
+function applyPhaseLocking(prev, candidate) {
+  const prevPhase = prev?.phase ?? "Grundlage";
+  const prevCandidate = prev?.candidate ?? null;
+  const prevStreak = Number.isFinite(prev?.streak) ? prev.streak : 0;
+
+  let streak = 1;
+  if (candidate && prevCandidate && candidate === prevCandidate) streak = prevStreak + 1;
+
+  let finalPhase = prevPhase;
+
+  if (candidate && candidate !== prevPhase) {
+    if (streak >= PHASE_SWITCH_STREAK) {
+      finalPhase = candidate;
+    }
+  } else if (candidate && candidate === prevPhase) {
+    finalPhase = prevPhase;
+  }
+
+  return {
+    phase: finalPhase,
+    candidate,
+    streak
+  };
 }
 
 // ---------------- Coaching-Notiz ----------------
 
-function buildCommentText({ phase, weeklyTargetTss, ctl, atl, acwr, decStats }) {
+function buildCommentText({ phase, candidatePhase, phaseStreak, weeklyTargetTss, ctl, atl, acwr, decStats, effStats, ctlStats }) {
   const acwrStr =
     acwr != null && isFinite(acwr) ? acwr.toFixed(2) : "k.A.";
+
   const driftStr =
-    decStats.medianDrift != null && isFinite(decStats.medianDrift)
+    decStats?.medianDrift != null && isFinite(decStats.medianDrift)
       ? (decStats.medianDrift * 100).toFixed(1) + "%"
+      : "k.A.";
+
+  const effTrendStr =
+    effStats?.effTrend != null && isFinite(effStats.effTrend)
+      ? (effStats.effTrend * 100).toFixed(1) + "%"
+      : "k.A.";
+
+  const ctlSlopeStr =
+    ctlStats?.ctlSlope != null && isFinite(ctlStats.ctlSlope)
+      ? ctlStats.ctlSlope.toFixed(2) + " CTL/Tag"
       : "k.A.";
 
   let phaseReason = "";
   if (phase === "Grundlage") {
     phaseReason =
-      "Fokus auf solide GA-Läufe: der PA/HR-Drift ist noch > 7% oder die Datenlage ist dünn. Ziel: Ökonomisierung und stabile Basis.";
+      "Fokus auf solide GA-Läufe: der PA/HR-Drift ist noch hoch oder die aerobe Effizienz steigt noch nicht stabil. Ziel: Ökonomisierung und belastbare Basis.";
   } else if (phase === "Aufbau") {
     phaseReason =
-      "PA/HR-Drift ca. 4–7%: deine Grundlage ist ordentlich, daher leicht erhöhte Belastung und mehr strukturierte Reize.";
+      "Grundlage ist brauchbar, aber noch nicht „peak-ready“. Mehr strukturierte Reize, Schwelle/Tempo progressiv, Gesamtlast weiter kontrolliert.";
   } else if (phase === "Spezifisch") {
     phaseReason =
-      "PA/HR-Drift < 4%: sehr stabile Grundlage, daher mehr wettkampfspezifische Einheiten bei gut kontrollierter Gesamtlast.";
+      "Sehr stabile GA-Qualität + Fortschritt: mehr wettkampfspezifische Einheiten, aber Umfang/Last sauber steuern (Form freilegen, nicht nur Fitness stapeln).";
   }
 
   return [
     `Coaching-Notiz`,
     ``,
-    `• Phase: ${phase}`,
+    `• Phase (gelockt): ${phase}`,
+    `• Phase-Kandidat: ${candidatePhase ?? "k.A."} (Streak: ${phaseStreak ?? 0}/${PHASE_SWITCH_STREAK})`,
     `• Wochenziel TSS: ~${weeklyTargetTss}`,
     `• Aktuelle Last: CTL ${ctl.toFixed(1)}, ATL ${atl.toFixed(1)}, ACWR ${acwrStr}`,
-    `• GA-Qualität: medianer PA/HR-Drift ${driftStr} (${decStats.gaWithDrift}/${decStats.gaCount} GA-Läufe mit Drift-Wert)`,
+    `• GA-Qualität: medianer PA/HR-Drift ${driftStr} (${decStats?.gaWithDrift ?? 0}/${decStats?.gaCount ?? 0} GA-Läufe mit Drift-Wert)`,
+    `• Aerobe Effizienz (GA): Trend 14d vs prev14d: ${effTrendStr} (n=${effStats?.nLast14 ?? 0}/${effStats?.nPrev14 ?? 0})`,
+    `• CTL-Stabilität: Slope ${ctlSlopeStr}`,
     ``,
     phaseReason
   ].join("\n");
+}
+
+// ---------------- Date Helpers ----------------
+
+function toDateStrUTC(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function mondayOfIsoWeekUTC(todayObj) {
+  const offset = (todayObj.getUTCDay() + 6) % 7;
+  const monday = new Date(todayObj);
+  monday.setUTCDate(monday.getUTCDate() - offset);
+  return monday;
+}
+
+function addDaysUTC(d, days) {
+  const x = new Date(d);
+  x.setUTCDate(x.getUTCDate() + days);
+  return x;
 }
 
 // ---------------- MAIN ----------------
@@ -290,11 +512,9 @@ async function handle(dryRun = true) {
     const today = new Date().toISOString().slice(0, 10);
     const todayObj = new Date(today + "T00:00:00Z");
 
-    // Montag der aktuellen Woche (ISO: Montag = 0)
-    const offset = (todayObj.getUTCDay() + 6) % 7;
-    const monday = new Date(todayObj);
-    monday.setUTCDate(monday.getUTCDate() - offset);
-    const mondayStr = monday.toISOString().slice(0, 10);
+    const monday = mondayOfIsoWeekUTC(todayObj);
+    const mondayStr = toDateStrUTC(monday);
+    const lastMondayStr = toDateStrUTC(addDaysUTC(monday, -7));
 
     // Wellness von heute laden (für CTL/ATL etc.)
     const wRes = await fetch(
@@ -310,9 +530,8 @@ async function handle(dryRun = true) {
     const hrMaxGlobal = well.hrMax ?? well.max_hr ?? 173;
 
     // Letzte 28 Tage Aktivitäten
-    const start28 = new Date(monday);
-    start28.setUTCDate(start28.getUTCDate() - 28);
-    const start28Str = start28.toISOString().slice(0, 10);
+    const start28 = addDaysUTC(monday, -28);
+    const start28Str = toDateStrUTC(start28);
 
     const actRes = await fetch(
       `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start28Str}&newest=${today}`,
@@ -329,24 +548,67 @@ async function handle(dryRun = true) {
       }
     }
 
-    const decStats = await extractRunDecouplingStats(
-      activities,
-      hrMaxGlobal,
-      authHeader
+    // Signale
+    const decStats = await extractRunDecouplingStats(activities, hrMaxGlobal, authHeader);
+    const effStats = computeGaEfficiencyTrend(activities, hrMaxGlobal);
+
+    const start14 = addDaysUTC(todayObj, -14);
+    const start14Str = toDateStrUTC(start14);
+    const wellnessSeries = await fetchWellnessSeries(authHeader, start14Str, today);
+    const ctlStats = computeCtlStability(wellnessSeries);
+
+    // Phase Kandidat (ungefiltert)
+    const candidatePhase = decidePhaseFromSignals({
+      medianDrift: decStats.medianDrift,
+      effTrend: effStats.effTrend,
+      ctlSlope: ctlStats.ctlSlope
+    });
+
+    // Vorwoche laden, um Meta (Streak) zu lesen
+    let prevMeta = null;
+    let prevPhaseFromField = null;
+
+    const prevRes = await fetch(
+      `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${lastMondayStr}`,
+      { headers: { Authorization: authHeader } }
     );
-    const phase = decidePhaseFromRunDecoupling(decStats.medianDrift);
+    if (prevRes.ok) {
+      const prevWell = await prevRes.json();
+      prevPhaseFromField = prevWell?.[PLAN_FIELD] ?? null;
+      const prevComment = prevWell?.[COMMENT_FIELD] ?? "";
+      prevMeta = parsePhaseMeta(prevComment);
+      // Falls kein Meta vorhanden: nimm PLAN_FIELD als Phase
+      if (!prevMeta && prevPhaseFromField) {
+        prevMeta = { phase: prevPhaseFromField, candidate: null, streak: 0 };
+      }
+    }
+
+    // Hysterese anwenden
+    const locked = applyPhaseLocking(prevMeta, candidatePhase);
+    const phase = locked.phase;
 
     const thisWeekPlan = calcNextWeekTarget(ctl, atl);
     const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
     const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
 
-    const commentText = buildCommentText({
+    const commentTextBase = buildCommentText({
       phase,
+      candidatePhase,
+      phaseStreak: locked.streak,
       weeklyTargetTss,
       ctl,
       atl,
       acwr: thisWeekPlan.acwr,
-      decStats
+      decStats,
+      effStats,
+      ctlStats
+    });
+
+    const commentText = appendPhaseMeta(commentTextBase, {
+      phase,
+      candidate: candidatePhase,
+      streak: locked.streak,
+      updated: new Date().toISOString()
     });
 
     let futureWriteResults = [];
@@ -423,6 +685,7 @@ async function handle(dryRun = true) {
       dryRun,
       thisWeek: {
         monday: mondayStr,
+        lastMonday: lastMondayStr,
         ctl,
         atl,
         atlMax: getAtlMax(ctl),
@@ -431,14 +694,18 @@ async function handle(dryRun = true) {
         weeklyTargetTss,
         ctlDelta: thisWeekPlan.ctlDelta,
         acwr: thisWeekPlan.acwr,
-        phase,
+        phaseLocked: phase,
+        phaseCandidate: candidatePhase,
+        phaseStreak: locked.streak,
         comment: commentText,
         runDecoupling: {
           ...decStats,
           medianDriftPercent:
             decStats.medianDrift != null ? decStats.medianDrift * 100 : null,
           totalActivities: activities.length
-        }
+        },
+        gaEfficiency: effStats,
+        ctlStability: ctlStats
       },
       progression,
       futureWriteResults: dryRun ? null : futureWriteResults
@@ -463,9 +730,8 @@ export default {
     return handle(dryRun);
   },
   async scheduled(event, env, ctx) {
-  // nur montags schreiben (UTC!)
-  if (!isUtcMonday()) return;
-  ctx.waitUntil(handle(false));
-}
+    // nur montags schreiben (UTC!)
+    if (!isUtcMonday()) return;
+    ctx.waitUntil(handle(false));
+  }
 };
-
