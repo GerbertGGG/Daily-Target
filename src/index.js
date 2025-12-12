@@ -21,7 +21,10 @@ function getAtlMax(ctl) {
   if (ctl < 90) return 65;
   return 85;
 }
-
+function isUtcMonday() {
+  const now = new Date();
+  return now.getUTCDay() === 1; // 1 = Monday
+}
 function shouldDeload(ctl, atl) {
   const atlMax = getAtlMax(ctl);
   let acwr = null;
@@ -460,7 +463,9 @@ export default {
     return handle(dryRun);
   },
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handle(false));
-  }
+  // nur montags schreiben (UTC!)
+  if (!isUtcMonday()) return;
+  ctx.waitUntil(handle(false));
+}
 };
 
