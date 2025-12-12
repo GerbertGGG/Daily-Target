@@ -110,7 +110,7 @@ function isGaRunForDecoupling(a, hrMaxGlobal) {
   if (!type.includes("run")) return false;
 
   const duration = a.moving_time ?? a.elapsed_time ?? a.icu_recording_time ?? 0;
-  if (!duration || duration < 40 * 60) return false;
+  if (!duration || duration < 39 * 60) return false;
 
   const athleteMax = a.athlete_max_hr ?? hrMaxGlobal ?? null;
   if (!athleteMax || athleteMax <= 0) return false;
