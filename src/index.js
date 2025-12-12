@@ -185,7 +185,6 @@ async function computeDriftFromStream(activityId, authHeader) {
   try {
     const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
     const res = await fetch(url, { headers: { Authorization: authHeader } });
-
     if (!res.ok) return null;
 
     const streams = await res.json();
@@ -241,11 +240,17 @@ async function extractRunDecouplingStats(activities, hrMaxGlobal, authHeader) {
   };
 }
 
+/**
+ * Kandidat nur aus Drift:
+ * - hoch -> Grundlage
+ * - mittel -> Aufbau (VO2max / Motor)
+ * - niedrig -> Intensiv (spezifisch / Race Pace)
+ */
 function decidePhaseFromRunDecoupling(medianDrift) {
-  if (medianDrift == null) return "Grundlage";
+  if (medianDrift == null) return null;       // kein Zwang-Fallback mehr
   if (medianDrift > 0.07) return "Grundlage";
   if (medianDrift > 0.04) return "Aufbau";
-  return "Spezifisch";
+  return "Intensiv";
 }
 
 // ---------------- GA Effizienz (Speed/HR) + Trend ----------------
@@ -305,23 +310,59 @@ function computeGaEfficiencyTrend(activities, hrMaxGlobal) {
   };
 }
 
-// ---------------- Phase Entscheidung (nur Drift + Effizienztrend) ----------------
+// ---------------- Phase Entscheidung (Drift + Effizienztrend Gate) ----------------
 
+/**
+ * Philosophie: unspezifisch -> spezifisch
+ * - Grundlage: wenn Drift hoch ODER Upgrade-Gate nicht erfüllt
+ * - Aufbau: VO2max / Motor, wenn Drift mittel oder Drift niedrig aber Gate nicht reicht
+ * - Intensiv: spezifisch (Race Pace), wenn Drift niedrig UND Gate ok
+ */
 function decidePhaseFromQualityOnly({ driftPhase, effTrend }) {
-  // "Upgrade nur wenn Trend >= +1%"
-  const okToUpgrade = (effTrend != null && isFinite(effTrend) && effTrend >= EFF_TREND_UPGRADE_MIN);
+  const okToUpgrade =
+    (effTrend != null && isFinite(effTrend) && effTrend >= EFF_TREND_UPGRADE_MIN);
+
+  // Wenn wir keinen Drift haben: konservativ -> Grundlage (aber bewusst, nicht „aus Versehen“)
+  if (driftPhase == null) return "Grundlage";
 
   if (driftPhase === "Grundlage") return "Grundlage";
 
   if (driftPhase === "Aufbau") {
+    // Upgrade-Gate optional: ohne Trend bleibt man lieber in Grundlage
     return okToUpgrade ? "Aufbau" : "Grundlage";
   }
 
-  // driftPhase === "Spezifisch"
-  return okToUpgrade ? "Spezifisch" : "Aufbau";
+  // driftPhase === "Intensiv"
+  return okToUpgrade ? "Intensiv" : "Aufbau";
 }
 
-// ---------------- Coaching-Notiz ----------------
+// ---------------- Coaching-Notiz: Beschreibung + Was tun ----------------
+
+function phaseActionText(phase) {
+  if (phase === "Grundlage") {
+    return [
+      "Was tun (Grundlage / unspezifisch):",
+      "• Fokus GA: ruhige, längere Läufe (Z2/GA1), Ökonomie & Aerob-System stabilisieren.",
+      "• Intensität niedrig halten (keine harten Intervalle), optional lockere Steigerungen.",
+      "• Ziel: Drift/Decoupling sinkt, Effizienztrend wird positiv."
+    ].join("\n");
+  }
+  if (phase === "Aufbau") {
+    return [
+      "Was tun (Aufbau = VO₂max / Motor groß machen):",
+      "• 1–2 VO₂max-orientierte Einheiten/Woche (kurz-hart), dazwischen viel locker.",
+      "• Rest GA/locker, Gesamtlast kontrolliert steigern (ACWR im Blick).",
+      "• Ziel: Leistungs-„Headroom“ aufbauen für spätere Spezifik."
+    ].join("\n");
+  }
+  // Intensiv
+  return [
+    "Was tun (Intensiv = spezifisch / Wettkampfpace):",
+    "• 1–2 längere Intervalle in Wettkampfpace bzw. knapp darum (Race-Pace-Blöcke).",
+    "• GA bleibt Basis, aber Qualität wird spezifischer (Ermüdungstoleranz / TTE).",
+    "• Ziel: Wettkampfleistung unter Ermüdung stabilisieren (PDC / spezifische Ausdauer)."
+  ].join("\n");
+}
 
 function buildCommentText({ phase, driftPhase, weeklyTargetTss, ctl, atl, acwr, decStats, effStats }) {
   const acwrStr =
@@ -337,34 +378,36 @@ function buildCommentText({ phase, driftPhase, weeklyTargetTss, ctl, atl, acwr, 
       ? (effStats.effTrend * 100).toFixed(1) + "%"
       : "k.A.";
 
-  const upgradeGateStr =
-    (effStats?.effTrend != null && isFinite(effStats.effTrend) && effStats.effTrend >= EFF_TREND_UPGRADE_MIN)
-      ? "ok"
-      : "nicht ok";
+  const upgradeGateOk =
+    (effStats?.effTrend != null && isFinite(effStats.effTrend) && effStats.effTrend >= EFF_TREND_UPGRADE_MIN);
+
+  const upgradeGateStr = upgradeGateOk ? "ok" : "nicht ok";
 
   let phaseReason = "";
   if (phase === "Grundlage") {
     phaseReason =
-      "Fokus auf solide GA-Läufe: Drift ist noch hoch ODER der Effizienztrend reicht (noch) nicht für ein Upgrade.";
+      "Warum: GA-Qualität noch nicht stabil genug (Drift hoch) oder Effizienztrend reicht (noch) nicht für Progression.";
   } else if (phase === "Aufbau") {
     phaseReason =
-      "Drift ist moderat bzw. sehr gut, aber Spezifisch gibt’s nur wenn der Effizienztrend in den letzten 14 Tagen positiv genug ist.";
-  } else if (phase === "Spezifisch") {
+      "Warum: Grundlage stabil/mittelstabil → jetzt VO₂max-„Motor“ ausbauen; Spezifik nur mit gutem Effizienztrend.";
+  } else if (phase === "Intensiv") {
     phaseReason =
-      "Sehr stabile GA-Qualität (Drift niedrig) UND Effizienztrend positiv: wettkampfspezifischer Fokus bei kontrollierter Gesamtlast.";
+      "Warum: Drift niedrig + Effizienztrend positiv → jetzt spezifisch (Race Pace) werden, bei kontrollierter Gesamtlast.";
   }
 
   return [
     `Coaching-Notiz`,
     ``,
-    `• Phase: ${phase}`,
-    `• Drift-basierter Kandidat: ${driftPhase}`,
+    `• Phase: ${phase}${phase === "Aufbau" ? " (VO₂max)" : (phase === "Intensiv" ? " (spezifisch)" : "")}`,
+    `• Drift-Kandidat: ${driftPhase ?? "k.A."}`,
     `• Effizienztrend (14d vs prev14d): ${effTrendStr} (Upgrade-Gate: ${upgradeGateStr}, Schwelle ${(EFF_TREND_UPGRADE_MIN * 100).toFixed(0)}%)`,
     `• Wochenziel TSS: ~${weeklyTargetTss}`,
     `• Aktuelle Last: CTL ${ctl.toFixed(1)}, ATL ${atl.toFixed(1)}, ACWR ${acwrStr}`,
     `• GA-Qualität: medianer PA/HR-Drift ${driftStr} (${decStats.gaWithDrift}/${decStats.gaCount} GA-Läufe mit Drift-Wert)`,
     ``,
-    phaseReason
+    phaseReason,
+    ``,
+    phaseActionText(phase)
   ].join("\n");
 }
 
@@ -448,8 +491,8 @@ async function handle(dryRun = true) {
       // 1) Aktueller Wochen-Montag mit Phase + Kommentar
       const bodyCurrent = {
         [WEEKLY_TARGET_FIELD]: weeklyTargetTss,
-        [PLAN_FIELD]: phase,
-        [COMMENT_FIELD]: commentText
+        [PLAN_FIELD]: phase,               // bleibt kurz: "Grundlage" / "Aufbau" / "Intensiv"
+        [COMMENT_FIELD]: commentText       // hier steht jetzt auch: was tun?
       };
 
       const putResCurrent = await fetch(
