@@ -1,116 +1,61 @@
-/**
- * ============================================================
- * IntervalsLimiterCoach v12 – Planned Races Edition (Final + Debug)
- * ============================================================
- * Features:
- * ✅ Geplante Rennen (planned=true, type=race, discipline) via /athlete/me/events
- * ✅ A-Race aware (discipline → Run / Ride / Triathlon / Duathlon)
- * ✅ GA-Filter (Run≥40min, Ride≥50min, HF 70–82 %, 68–80 %, VI≤1.15, keine Intervalle)
- * ✅ VirtualRide erlaubt, solange keine Intervalle
- * ✅ Drift & Effizienz mit Stream-Fallback
- * ✅ CTL/ATL/TSS Simulation (Friel)
- * ✅ Montagsschutz (nur montags schreiben)
- * ✅ Ampel-Tabelle + Coaching-Kommentar
- * ✅ DEBUG: Event-Shape + Normalisierung + Filtergründe + Response-Debug
- * ============================================================
- */
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-const BASE_URL = "https://intervals.icu/api/v1";
-const API_KEY = "API_KEY";
-const API_SECRET = "1xg1v04ym957jsqva8720oo01";
-const ATHLETE_ID = "i105857";
-const COMMENT_FIELD = "comments";
-const DEBUG = true;
-
-// ============================================================
-// 🧠 Utility
-// ============================================================
+// src/index.js
+var BASE_URL = "https://intervals.icu/api/v1";
+var API_KEY = "API_KEY";
+var API_SECRET = "1xg1v04ym957jsqva8720oo01";
+var ATHLETE_ID = "i105857";
+var COMMENT_FIELD = "comments";
+var DEBUG = true;
 function median(values) {
   if (!values?.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[mid - 1] + sorted[mid]) / 2
-    : sorted[mid];
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
-
-// ============================================================
-// 🫀 GA-Filter (Run & Ride, virtuell erlaubt, keine Intervalle)
-// ============================================================
+__name(median, "median");
 function isGaSession(a, hrMax) {
   const type = (a.type || "").toLowerCase();
-  const name = (a.name || "").toLowerCase();
+  if (!type.match(/run|ride/)) return false;
   const dur = a.moving_time ?? 0;
   const hr = a.average_heartrate ?? null;
+  const ifVal = a.IF ?? null;
+  const name = (a.name || "").toLowerCase();
+  if (dur < 40 * 60) return false;
   if (!hr || !hrMax) return false;
   const rel = hr / hrMax;
-
-  // 🏃‍♂️ RUN
-  if (type.includes("run")) {
-    if (dur < 40 * 60) return false;
-    if (rel < 0.70 || rel > 0.82) return false;
-    if (/intervall|interval|vo2|max|schwelle|berg|30s|15\/15|test/i.test(name)) return false;
-    return true;
-  }
-
-  // 🚴‍♂️ RIDE
-  if (type.includes("ride")) {
-    if (dur < 50 * 60) return false;
-    if (rel < 0.68 || rel > 0.80) return false;
-    if (/intervall|interval|vo2|max|schwelle|sweet|test|ramp|ftp|berg/i.test(name)) return false;
-    const np = a.normalized_power ?? null;
-    const avg = a.avg_power ?? a.average_watts ?? null;
-    if (np && avg && np / avg > 1.15) return false;
-    return true; // VirtualRide erlaubt
-  }
-
-  return false;
+  if (rel < 0.7 || rel > 0.82) return false;
+  if (ifVal && ifVal > 0.8) return false;
+  if (/intervall|interval|schwelle|vo2|max|berg|test|30s|30\/15|15\/15/i.test(name)) return false;
+  return true;
 }
-
-// ============================================================
-// 🧮 Driftberechnung (mit Retry + Stream)
-// ============================================================
-async function computeDriftFromStream(a, authHeader) {
+__name(isGaSession, "isGaSession");
+async function computePaHrDecoupling(time, hr, velocity) {
+  if (!time || !hr || !velocity) return null;
+  const n = Math.min(time.length, hr.length, velocity.length);
+  if (n < 200) return null;
+  const mid = Math.floor(n / 2);
+  const rel1 = velocity.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
+  const rel2 = velocity.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
+  if (!rel1 || !isFinite(rel1)) return null;
+  return Math.abs((rel2 - rel1) / rel1);
+}
+__name(computePaHrDecoupling, "computePaHrDecoupling");
+async function computeDriftFromStream(activityId, authHeader) {
   try {
-    const url = `${BASE_URL}/activity/${a.id}/streams.json?types=time,heartrate,velocity_smooth,watts_smooth,watts`;
-    let res = await fetch(url, { headers: { Authorization: authHeader } });
-    let streams;
-    if (!res.ok) {
-      await new Promise(r => setTimeout(r, 300));
-      const retry = await fetch(url, { headers: { Authorization: authHeader } });
-      if (!retry.ok) return null;
-      streams = await retry.json();
-    } else {
-      streams = await res.json();
-    }
-
-    const get = (t) => streams.find(s => s.type === t)?.data ?? null;
-    const time = get("time");
-    const hr = get("heartrate");
-    const vel = get("velocity_smooth");
-    const power = get("watts_smooth") || get("watts");
-
-    if (a.type?.includes("Ride") && power) {
-      return computeDecoupling(time, hr, power);
-    } else {
-      return computeDecoupling(time, hr, vel);
-    }
-  } catch {
+    const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
+    const res = await fetch(url, { headers: { Authorization: authHeader } });
+    if (!res.ok) return null;
+    const streams = await res.json();
+    const get = /* @__PURE__ */ __name((t) => streams.find((s) => s.type === t)?.data ?? null, "get");
+    return computePaHrDecoupling(get("time"), get("heartrate"), get("velocity_smooth"));
+  } catch (e) {
+    if (DEBUG) console.log("Drift Stream Error", e);
     return null;
   }
 }
-
-function computeDecoupling(time, hr, data) {
-  if (!time || !hr || !data) return null;
-  const n = Math.min(time.length, hr.length, data.length);
-  if (n < 200) return null;
-  const mid = Math.floor(n / 2);
-  const rel1 = data.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
-  const rel2 = data.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
-  if (!rel1 || !isFinite(rel1)) return null;
-  return Math.min(Math.abs((rel2 - rel1) / rel1), 0.15);
-}
-
+__name(computeDriftFromStream, "computeDriftFromStream");
 function extractActivityDecoupling(a) {
   const keys = ["pahr_decoupling", "pwhr_decoupling", "decoupling"];
   for (const k of keys) {
@@ -123,43 +68,32 @@ function extractActivityDecoupling(a) {
   }
   return null;
 }
-
+__name(extractActivityDecoupling, "extractActivityDecoupling");
 async function extractDriftStats(activities, hrMax, authHeader) {
   const drifts = [];
   for (const a of activities) {
     if (!isGaSession(a, hrMax)) continue;
-    if (!a.average_heartrate || a.average_heartrate < 60) continue;
     let drift = extractActivityDecoupling(a);
-    if (drift == null) drift = await computeDriftFromStream(a, authHeader);
+    if (drift == null) drift = await computeDriftFromStream(a.id, authHeader);
     if (drift != null) drifts.push(drift);
   }
-  return { medianDrift: median(drifts), count: drifts.length };
+  const med = median(drifts);
+  if (DEBUG) console.log(`Drift Median (${activities[0]?.type ?? "?"}):`, med);
+  return { medianDrift: med, count: drifts.length };
 }
-
-// ============================================================
-// ⚙️ Effizienztrend
-// ============================================================
+__name(extractDriftStats, "extractDriftStats");
 function computeEfficiency(a, hrMax) {
   const hr = a.average_heartrate ?? null;
   if (!hr || !hrMax) return null;
   const rel = hr / hrMax;
   if (rel < 0.7 || rel > 0.82) return null;
-
-  const type = a.type?.toLowerCase() ?? "";
-  if (type.includes("ride")) {
-    const power = a.weighted_average_watts ?? a.avg_power ?? null;
-    if (power) return power / hr;
-    const v = a.average_speed ?? a.avg_speed ?? null;
-    return v ? v / hr : null;
-  }
-
   const v = a.average_speed ?? a.avg_speed ?? null;
   return v ? v / hr : null;
 }
-
+__name(computeEfficiency, "computeEfficiency");
 function computeEfficiencyTrend(activities, hrMax) {
   const now = Date.now();
-  const d14 = 14 * 24 * 3600 * 1000;
+  const d14 = 14 * 24 * 3600 * 1e3;
   const effLast = [], effPrev = [];
   for (const a of activities) {
     if (!isGaSession(a, hrMax)) continue;
@@ -171,14 +105,38 @@ function computeEfficiencyTrend(activities, hrMax) {
   }
   const mLast = median(effLast);
   const mPrev = median(effPrev);
-  return (mLast && mPrev) ? (mLast - mPrev) / mPrev : 0;
+  const trend = mLast && mPrev ? (mLast - mPrev) / mPrev : 0;
+  if (DEBUG) console.log("EffTrend:", trend.toFixed(4));
+  return trend;
 }
-
-// ============================================================
-// 🧮 CTL/ATL/TSS Simulation (Friel)
-// ============================================================
-const CTL_DELTA_TARGET = 0.8;
-
+__name(computeEfficiencyTrend, "computeEfficiencyTrend");
+var CTL_DELTA_TARGET = 0.8;
+var ACWR_SOFT_MAX = 1.3;
+var ACWR_HARD_MAX = 1.5;
+var DELOAD_FACTOR = 0.9;
+function getAtlMax(ctl) {
+  if (ctl < 30) return 30;
+  if (ctl < 60) return 45;
+  if (ctl < 90) return 65;
+  return 85;
+}
+__name(getAtlMax, "getAtlMax");
+function shouldDeload(ctl, atl) {
+  const acwr = ctl > 0 ? atl / ctl : 1;
+  if (acwr >= ACWR_HARD_MAX) return true;
+  if (atl > getAtlMax(ctl)) return true;
+  return false;
+}
+__name(shouldDeload, "shouldDeload");
+function maxSafeCtlDelta(ctl) {
+  if (ctl <= 0) return CTL_DELTA_TARGET;
+  const numerator = (ACWR_SOFT_MAX - 1) * ctl;
+  const denominator = 6 - ACWR_SOFT_MAX;
+  const d = numerator / denominator;
+  if (!isFinite(d) || d <= 0) return 0;
+  return d;
+}
+__name(maxSafeCtlDelta, "maxSafeCtlDelta");
 function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   const tssMean = ctl + 6 * ctlDelta;
   const weekTss = tssMean * 7;
@@ -186,14 +144,33 @@ function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   const nextAtl = tssMean;
   const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
   const weekType = ctlDelta > 0 ? "BUILD" : ctlDelta < 0 ? "DELOAD" : "MAINTAIN";
-  return { weekType, ctlDelta, weekTss, nextCtl, nextAtl, acwr };
+  return { weekType, ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
 }
-
+__name(computeWeekFromCtlDelta, "computeWeekFromCtlDelta");
+function computeDeloadWeek(ctl, atl) {
+  const tssMean = DELOAD_FACTOR * ctl;
+  const weekTss = tssMean * 7;
+  const ctlDelta = (tssMean - ctl) / 6;
+  const nextCtl = ctl + ctlDelta;
+  const nextAtl = tssMean;
+  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
+  return { weekType: "DELOAD", ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
+}
+__name(computeDeloadWeek, "computeDeloadWeek");
+function calcNextWeekTarget(ctl, atl) {
+  if (shouldDeload(ctl, atl)) return computeDeloadWeek(ctl, atl);
+  const dMaxSafe = maxSafeCtlDelta(ctl);
+  let targetDelta = CTL_DELTA_TARGET;
+  if (dMaxSafe <= 0) targetDelta = 0;
+  else if (dMaxSafe < targetDelta) targetDelta = dMaxSafe;
+  return computeWeekFromCtlDelta(ctl, atl, targetDelta);
+}
+__name(calcNextWeekTarget, "calcNextWeekTarget");
 function simulateFutureWeeks(ctl, atl, weeks = 6) {
   const out = [];
   let currentCtl = ctl, currentAtl = atl;
   for (let w = 1; w <= weeks; w++) {
-    const res = computeWeekFromCtlDelta(currentCtl, currentAtl, CTL_DELTA_TARGET);
+    const res = calcNextWeekTarget(currentCtl, currentAtl);
     out.push({
       week: w,
       weekType: res.weekType,
@@ -207,15 +184,12 @@ function simulateFutureWeeks(ctl, atl, weeks = 6) {
   }
   return out;
 }
-
-// ============================================================
-// 🚦 Ampel & Phase
-// ============================================================
+__name(simulateFutureWeeks, "simulateFutureWeeks");
 function statusColor(c) {
-  return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
+  return c === "green" ? "\u{1F7E2}" : c === "yellow" ? "\u{1F7E1}" : c === "red" ? "\u{1F534}" : "\u26AA";
 }
-
-function buildStatusAmpel({ dec, eff, rec, sport }) {
+__name(statusColor, "statusColor");
+function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
   const markers = [];
   markers.push({
     name: "Aerobe Basis (Drift)",
@@ -223,261 +197,74 @@ function buildStatusAmpel({ dec, eff, rec, sport }) {
     color: dec == null ? "white" : dec < 0.05 ? "green" : dec < 0.07 ? "yellow" : "red"
   });
   markers.push({
-    name: "Effizienz (W/HR oder Speed/HR)",
+    name: "Effizienz (Speed/HR)",
     value: `${(eff * 100).toFixed(1)} %`,
     color: eff > 0.01 ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
   });
   markers.push({
-    name: "Ermüdungsresistenz",
+    name: "Erm\xFCdungsresistenz",
     value: rec != null ? rec.toFixed(2) : "k.A.",
     color: rec >= 0.65 ? "green" : rec >= 0.6 ? "yellow" : "red"
   });
-
-  const table =
-    `| ${sport} | Wert | Status |\n|:-------|:------:|:------:|\n` +
-    markers.map(m => `| ${m.name} | ${m.value} | ${statusColor(m.color)} |`).join("\n");
+  const table = `| ${sport} | Wert | Status |
+|:-------|:------:|:------:|
+` + markers.map((m) => `| ${m.name} | ${m.value} | ${statusColor(m.color)} |`).join("\n");
   return { table, markers };
 }
-
+__name(buildStatusAmpel, "buildStatusAmpel");
 function buildPhaseRecommendation(runMarkers, rideMarkers) {
-  const allRed = [...runMarkers, ...rideMarkers].filter(m => m.color === "red");
-  if (!allRed.length) return "🏋️‍♂️ Aufbau – normale Trainingswoche beibehalten.";
-  if (allRed.some(m => m.name.includes("Aerobe")))
-    return "🫀 Grundlage – aerobe Basis limitiert, Fokus auf GA1/Z2 Einheiten.";
+  const allRed = [...runMarkers, ...rideMarkers].filter((m) => m.color === "red");
+  if (!allRed.length) return "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F Aufbau \u2013 normale Trainingswoche beibehalten.";
+  if (allRed.some((m) => m.name.includes("Aerobe")))
+    return "\u{1FAC0} Grundlage \u2013 aerobe Basis limitiert, Fokus auf GA1/Z2 Einheiten.";
   if (allRed.length > 1)
-    return "🫀 Grundlage – mehrere Marker limitiert → ruhige Woche, Fokus auf aerobe Stabilität.";
-  return "🏋️‍♂️ Aufbau – stabile Basis, Technik- oder Schwellenreize möglich.";
+    return "\u{1FAC0} Grundlage \u2013 mehrere Marker limitiert \u2192 ruhige Woche, Fokus auf aerobe Stabilit\xE4t.";
+  return "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F Aufbau \u2013 stabile Basis, Technik- oder Schwellenreize m\xF6glich.";
 }
-
-// ============================================================
-// 🏁 Events: Fetch + Normalize + Debug
-// ============================================================
-function debugEventShape(events, limit = 5) {
-  return (events || []).slice(0, limit).map(e => ({
-    id: e.id,
-    name: e.name || e.title,
-    start_date_local: e.start_date_local,
-    start_date: e.start_date,
-    date: e.date,
-    type: e.type,
-    discipline: e.discipline,
-    sport: e.sport,
-    activity_type: e.activity_type,
-    category: e.category,
-    planned: e.planned,
-    completed: e.completed,
-    status: e.status
-  }));
-}
-
-async function fetchPlannedRaces(authHeader) {
-  // A) exakt dein Call (Kalenderjahr 2025)
-  const urlA = `${BASE_URL}/athlete/me/events?oldest=2025-01-01&newest=2025-12-31&planned=true&type=race`;
-
-  // B) fallback: ab heute 12 Monate
-  const today = new Date();
-  const oldestB = today.toISOString().slice(0, 10);
-  const newestB = new Date(today);
-  newestB.setFullYear(newestB.getFullYear() + 1);
-  const urlB = `${BASE_URL}/athlete/me/events?oldest=${oldestB}&newest=${newestB.toISOString().slice(0, 10)}&planned=true&type=race`;
-
-  async function tryFetch(url) {
-    const res = await fetch(url, { headers: { Authorization: authHeader } });
-
-    // Debug: status + body (auch wenn kein JSON)
-    let bodyText = "";
-    try { bodyText = await res.text(); } catch {}
-
-    if (DEBUG) {
-      console.log("[events] GET", url);
-      console.log("[events] status", res.status);
-      console.log("[events] body", bodyText?.slice(0, 2000));
-    }
-
-    if (!res.ok) return null;
-
-    // parse
-    let json = null;
-    try { json = bodyText ? JSON.parse(bodyText) : null; } catch { json = null; }
-
-    if (Array.isArray(json)) return json;
-    if (json && Array.isArray(json.events)) return json.events;
-
-    // wenn die API wirklich leer/anders ist, lieber leeres Array als Crash
-    return [];
-  }
-
-  let events = await tryFetch(urlA);
-  if (events == null) events = await tryFetch(urlB);
-  if (events == null) return [];
-
-  return events;
-}
-
-function normalizeRaceEvent(e) {
-  const dateStr =
-    e.start_date_local ||
-    e.start_date ||
-    e.date ||
-    e.start ||
-    null;
-
-  const start = dateStr ? new Date(dateStr) : null;
-
-  const disciplineRaw =
-    e.discipline ||
-    e.sport ||
-    e.activity_type ||
-    e.type || // fallback
-    "";
-
-  const completed =
-    Boolean(e.completed) ||
-    String(e.status || "").toLowerCase() === "completed" ||
-    false;
-
-  return {
-    raw: e,
-    id: e.id,
-    name: e.name || e.title || "Race",
-    start_date_local: e.start_date_local || e.start_date || e.date || null,
-    start,
-    completed,
-    discipline: String(disciplineRaw).toLowerCase(),
-  };
-}
-
-// ============================================================
-// MAIN
-// ============================================================
+__name(buildPhaseRecommendation, "buildPhaseRecommendation");
 async function handle(dryRun = true) {
-  const today = new Date();
+  const today = /* @__PURE__ */ new Date();
   const isMonday = today.getUTCDay() === 1;
-  if (!isMonday && !dryRun)
-    return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt" }, null, 2));
-
+  if (!isMonday && !dryRun) {
+    console.log("\u26D4 Schreibschutz aktiv \u2014 kein Montag.");
+    return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt", dryRun: true }, null, 2), { status: 200 });
+  }
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
-
   const monday = new Date(today);
-  monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+  monday.setUTCDate(today.getUTCDate() - (today.getUTCDay() + 6) % 7);
   const mondayStr = monday.toISOString().slice(0, 10);
-
-  // Wellness
   const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
   const ctl = well.ctl ?? 60;
   const atl = well.atl ?? 65;
   const rec = well.recoveryIndex ?? 0.65;
-
-  // ============================================================
-  // 🏁 Geplante Rennen (robust über /athlete/me/events)
-  // ============================================================
-  const plannedEventsRaw = await fetchPlannedRaces(auth);
-
-  if (DEBUG) {
-    console.log("========== RAW EVENTS (first 5) ==========");
-    console.log(JSON.stringify(debugEventShape(plannedEventsRaw), null, 2));
-  }
-
-  const plannedEvents = (plannedEventsRaw || [])
-    .map(normalizeRaceEvent)
-    .filter(x => x.start && !isNaN(x.start.getTime()));
-
-  if (DEBUG) {
-    console.log("========== NORMALIZED EVENTS ==========");
-    console.log(JSON.stringify(
-      plannedEvents.map(e => ({
-        name: e.name,
-        start: e.start?.toISOString?.() ?? null,
-        discipline: e.discipline,
-        completed: e.completed,
-      })),
-      null,
-      2
-    ));
-  }
-
-  const raceEvents = plannedEvents
-    .filter(e => !e.completed)
-    .filter(e => e.start >= today)
-    .sort((a, b) => a.start - b.start);
-
-  if (DEBUG && raceEvents.length === 0) {
-    console.log("⚠️ NO UPCOMING RACE FOUND");
-    console.log("today =", today.toISOString());
-    console.log(JSON.stringify(
-      plannedEvents.map(e => ({
-        name: e.name,
-        start: e.start?.toISOString?.() ?? null,
-        completed: e.completed,
-        discipline: e.discipline
-      })),
-      null,
-      2
-    ));
-  }
-
-  const upcomingEvent = raceEvents[0] || null;
-
-  let activeSport = "both";
-  if (upcomingEvent) {
-    const disc = upcomingEvent.discipline || "";
-    if (disc.includes("run")) activeSport = "run";
-    else if (disc.includes("ride") || disc.includes("bike")) activeSport = "ride";
-    else if (disc.includes("tri") || disc.includes("duat")) activeSport = "both";
-  }
-
-  // ============================================================
-  // Aktivitäten & Analysen
-  // ============================================================
   const start = new Date(monday);
   start.setUTCDate(start.getUTCDate() - 28);
-
-  const actRes = await fetch(
-    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
-    { headers: { Authorization: auth } }
-  );
+  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${today.toISOString().slice(0, 10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
-  const runActs = acts.filter(a => a.type?.includes("Run"));
-  const rideActs = acts.filter(a => a.type?.includes("Ride"));
-
+  const runActs = acts.filter((a) => a.type?.includes("Run"));
+  const rideActs = acts.filter((a) => a.type?.includes("Ride"));
   const runDrift = await extractDriftStats(runActs, hrMax, auth);
   const rideDrift = await extractDriftStats(rideActs, hrMax, auth);
   const runEff = computeEfficiencyTrend(runActs, hrMax);
   const rideEff = computeEfficiencyTrend(rideActs, hrMax);
-
-  const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
-  const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
-
-  let phase;
-  if (activeSport === "run") phase = buildPhaseRecommendation(runTable.markers, []);
-  else if (activeSport === "ride") phase = buildPhaseRecommendation([], rideTable.markers);
-  else phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
-
+  const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "\u{1F3C3}\u200D\u2642\uFE0F Laufen" });
+  const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "\u{1F6B4}\u200D\u2642\uFE0F Rad" });
+  const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
   const progression = simulateFutureWeeks(ctl, atl, 6);
-
-  // Kommentar
-  const eventNote = upcomingEvent
-    ? `🎯 Geplantes Rennen erkannt: ${upcomingEvent.name} (${upcomingEvent.discipline}) am ${String(upcomingEvent.start_date_local).slice(0,10)}`
-    : `ℹ️ Kein geplantes Rennen gefunden – allgemeine Trainingsphase (Run + Ride kombiniert).`;
-
-  const commentBlocks = [eventNote];
-
-  if (activeSport === "run" || activeSport === "both")
-    commentBlocks.push("", "🏃‍♂️ **Laufen**", runTable.table);
-  if (activeSport === "ride" || activeSport === "both")
-    commentBlocks.push("", "🚴‍♂️ **Rad**", rideTable.table);
-
-  commentBlocks.push(
+  const comment = [
+    "\u{1F3C1} **Status-Ampel (Heute)**",
+    "",
+    runTable.table,
+    "",
+    rideTable.table,
     "",
     `**Phase:** ${phase}`,
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
-    `**Vorschau:** ${progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`
-  );
-
-  const comment = commentBlocks.join("\n");
-
+    `**Vorschau:** ${progression.map((p) => `W${p.week}: ${p.weekType} \u2192 ${p.weekTss}`).join(", ")}`
+  ].join("\n");
+  if (DEBUG) console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression });
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
       method: "PUT",
@@ -485,65 +272,20 @@ async function handle(dryRun = true) {
       body: JSON.stringify({ [COMMENT_FIELD]: comment })
     });
   }
-
-  const result = {
-    event: upcomingEvent
-      ? { name: upcomingEvent.name, discipline: upcomingEvent.discipline, date: upcomingEvent.start_date_local }
-      : null,
-
-    debug: DEBUG ? {
-      rawEventCount: (plannedEventsRaw || []).length,
-      normalizedEventCount: plannedEvents.length,
-      upcomingCandidates: raceEvents.map(e => ({
-        name: e.name,
-        date: e.start?.toISOString?.() ?? null,
-        discipline: e.discipline
-      }))
-    } : undefined,
-
-    activeSport,
-    run: runTable,
-    ride: rideTable,
-    phase,
-    progression,
-    comment
-  };
-
-  if (DEBUG) console.log(JSON.stringify(result, null, 2));
-
-  return new Response(JSON.stringify(result, null, 2), { status: 200 });
+  return new Response(JSON.stringify({ run: runTable, ride: rideTable, phase, progression, comment }, null, 2), { status: 200 });
 }
-
-// ============================================================
-// ✅ Export (Fetch + Scheduler) – nur EIN Default-Export erlaubt!
-// ============================================================
-export default {
-  async fetch(request, env, ctx) {
-    try {
-      const url = new URL(request.url);
-      const writeParam = url.searchParams.get("write");
-      const shouldWrite =
-        writeParam === "1" ||
-        writeParam === "true" ||
-        writeParam === "yes";
-
-      const dryRun = !shouldWrite;
-      const response = await handle(dryRun);
-      return response;
-    } catch (err) {
-      return new Response("Error: " + err.message, { status: 500 });
-    }
+__name(handle, "handle");
+var index_default = {
+  async fetch(req) {
+    const url = new URL(req.url);
+    const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
+    return handle(!write);
   },
-
-  async scheduled(event, env, ctx) {
-    // Nur montags ausführen (UTC)
-    try {
-      const now = new Date();
-      const isMonday = now.getUTCDay() === 1;
-      if (!isMonday) return;
-      ctx.waitUntil(handle(false));
-    } catch (err) {
-      console.error("Scheduled error:", err);
-    }
+  async scheduled(_, __, ctx) {
+    if ((/* @__PURE__ */ new Date()).getUTCDay() === 1) ctx.waitUntil(handle(false));
   }
 };
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
