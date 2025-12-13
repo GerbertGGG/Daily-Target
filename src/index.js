@@ -120,18 +120,29 @@ function computeEfficiencyTrend(activities, hrMax) {
 __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
 // 🏁 Rennen erkennen (inkl. geplante)
+// 🏁 Rennen erkennen (inkl. Kategorie & geplante)
 function logRaceEvents(activities) {
   const raceEvents = activities.filter(a => {
     const name = (a.name || "").toLowerCase();
     const type = (a.type || "").toLowerCase();
+    const category = (a.category || a.category_name || "").toLowerCase();
+    const desc = (a.description || "").toLowerCase();
+
     return (
-      type.includes("race") ||
-      name.includes("race") ||
+      // 🏁 Kategorie enthält Rennen (z. B. "A-Rennen", "B-Rennen", "C-Rennen")
+      category.includes("rennen") ||
+      // 🏃‍♂️ Name oder Beschreibung enthält typische Rennbegriffe
       name.includes("rennen") ||
+      name.includes("lauf") ||          // erkennt "AOK Lauf", "Silvesterlauf" etc.
+      name.includes("race") ||
       name.includes("marathon") ||
       name.includes("triathlon") ||
+      name.includes("ironman") ||
       name.includes("tt") ||
-      name.includes("competition")
+      name.includes("competition") ||
+      desc.includes("rennen") ||
+      // 🚴‍♂️ Typische Event-Typen (falls API Race liefert)
+      type.includes("race")
     );
   });
 
@@ -139,7 +150,7 @@ function logRaceEvents(activities) {
     console.log("🏁 Geplante oder vergangene Rennen gefunden:");
     raceEvents.forEach((r, i) => {
       console.log(
-        `#${i + 1}: ${r.name} | Typ: ${r.type} | Datum: ${r.start_date_local || r.start_date
+        `#${i + 1}: ${r.name} | Kategorie: ${r.category || r.category_name || "-"} | Typ: ${r.type} | Datum: ${r.start_date_local || r.start_date
         } | Distanz: ${(r.distance / 1000).toFixed(1)} km | TSS: ${r.icu_training_load || "?"}`
       );
     });
@@ -151,6 +162,7 @@ function logRaceEvents(activities) {
 }
 __name(logRaceEvents, "logRaceEvents");
 
+  
 var CTL_DELTA_TARGET = 0.8;
 var ACWR_SOFT_MAX = 1.3;
 var ACWR_HARD_MAX = 1.5;
