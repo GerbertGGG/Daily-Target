@@ -8,6 +8,7 @@ var API_SECRET = "1xg1v04ym957jsqva8720oo01";
 var ATHLETE_ID = "i105857";
 var COMMENT_FIELD = "comments";
 var DEBUG = true;
+
 function median(values) {
   if (!values?.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -15,6 +16,7 @@ function median(values) {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 __name(median, "median");
+
 function isGaSession(a, hrMax) {
   const type = (a.type || "").toLowerCase();
   if (!type.match(/run|ride/)) return false;
@@ -31,6 +33,7 @@ function isGaSession(a, hrMax) {
   return true;
 }
 __name(isGaSession, "isGaSession");
+
 async function computePaHrDecoupling(time, hr, velocity) {
   if (!time || !hr || !velocity) return null;
   const n = Math.min(time.length, hr.length, velocity.length);
@@ -42,6 +45,7 @@ async function computePaHrDecoupling(time, hr, velocity) {
   return Math.abs((rel2 - rel1) / rel1);
 }
 __name(computePaHrDecoupling, "computePaHrDecoupling");
+
 async function computeDriftFromStream(activityId, authHeader) {
   try {
     const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
@@ -56,6 +60,7 @@ async function computeDriftFromStream(activityId, authHeader) {
   }
 }
 __name(computeDriftFromStream, "computeDriftFromStream");
+
 function extractActivityDecoupling(a) {
   const keys = ["pahr_decoupling", "pwhr_decoupling", "decoupling"];
   for (const k of keys) {
@@ -69,6 +74,7 @@ function extractActivityDecoupling(a) {
   return null;
 }
 __name(extractActivityDecoupling, "extractActivityDecoupling");
+
 async function extractDriftStats(activities, hrMax, authHeader) {
   const drifts = [];
   for (const a of activities) {
@@ -82,6 +88,7 @@ async function extractDriftStats(activities, hrMax, authHeader) {
   return { medianDrift: med, count: drifts.length };
 }
 __name(extractDriftStats, "extractDriftStats");
+
 function computeEfficiency(a, hrMax) {
   const hr = a.average_heartrate ?? null;
   if (!hr || !hrMax) return null;
@@ -91,6 +98,7 @@ function computeEfficiency(a, hrMax) {
   return v ? v / hr : null;
 }
 __name(computeEfficiency, "computeEfficiency");
+
 function computeEfficiencyTrend(activities, hrMax) {
   const now = Date.now();
   const d14 = 14 * 24 * 3600 * 1e3;
@@ -110,10 +118,44 @@ function computeEfficiencyTrend(activities, hrMax) {
   return trend;
 }
 __name(computeEfficiencyTrend, "computeEfficiencyTrend");
+
+// 🏁 Rennen erkennen und loggen
+function logRaceEvents(activities) {
+  const raceEvents = activities.filter(a => {
+    const name = (a.name || "").toLowerCase();
+    const type = (a.type || "").toLowerCase();
+    return (
+      type.includes("race") ||
+      name.includes("race") ||
+      name.includes("rennen") ||
+      name.includes("marathon") ||
+      name.includes("triathlon") ||
+      name.includes("tt") ||
+      name.includes("competition")
+    );
+  });
+
+  if (DEBUG && raceEvents.length > 0) {
+    console.log("🏁 Gefundene Rennen:");
+    raceEvents.forEach((r, i) => {
+      console.log(
+        `#${i + 1}: ${r.name} | Typ: ${r.type} | Datum: ${r.start_date_local || r.start_date
+        } | Distanz: ${(r.distance / 1000).toFixed(1)} km | TSS: ${r.icu_training_load || "?"}`
+      );
+    });
+  } else if (DEBUG) {
+    console.log("⚪ Keine Rennen im angegebenen Zeitraum gefunden.");
+  }
+
+  return raceEvents;
+}
+__name(logRaceEvents, "logRaceEvents");
+
 var CTL_DELTA_TARGET = 0.8;
 var ACWR_SOFT_MAX = 1.3;
 var ACWR_HARD_MAX = 1.5;
 var DELOAD_FACTOR = 0.9;
+
 function getAtlMax(ctl) {
   if (ctl < 30) return 30;
   if (ctl < 60) return 45;
@@ -121,6 +163,7 @@ function getAtlMax(ctl) {
   return 85;
 }
 __name(getAtlMax, "getAtlMax");
+
 function shouldDeload(ctl, atl) {
   const acwr = ctl > 0 ? atl / ctl : 1;
   if (acwr >= ACWR_HARD_MAX) return true;
@@ -128,6 +171,7 @@ function shouldDeload(ctl, atl) {
   return false;
 }
 __name(shouldDeload, "shouldDeload");
+
 function maxSafeCtlDelta(ctl) {
   if (ctl <= 0) return CTL_DELTA_TARGET;
   const numerator = (ACWR_SOFT_MAX - 1) * ctl;
@@ -137,6 +181,7 @@ function maxSafeCtlDelta(ctl) {
   return d;
 }
 __name(maxSafeCtlDelta, "maxSafeCtlDelta");
+
 function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   const tssMean = ctl + 6 * ctlDelta;
   const weekTss = tssMean * 7;
@@ -147,6 +192,7 @@ function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   return { weekType, ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
 }
 __name(computeWeekFromCtlDelta, "computeWeekFromCtlDelta");
+
 function computeDeloadWeek(ctl, atl) {
   const tssMean = DELOAD_FACTOR * ctl;
   const weekTss = tssMean * 7;
@@ -157,6 +203,7 @@ function computeDeloadWeek(ctl, atl) {
   return { weekType: "DELOAD", ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
 }
 __name(computeDeloadWeek, "computeDeloadWeek");
+
 function calcNextWeekTarget(ctl, atl) {
   if (shouldDeload(ctl, atl)) return computeDeloadWeek(ctl, atl);
   const dMaxSafe = maxSafeCtlDelta(ctl);
@@ -166,6 +213,7 @@ function calcNextWeekTarget(ctl, atl) {
   return computeWeekFromCtlDelta(ctl, atl, targetDelta);
 }
 __name(calcNextWeekTarget, "calcNextWeekTarget");
+
 function simulateFutureWeeks(ctl, atl, weeks = 6) {
   const out = [];
   let currentCtl = ctl, currentAtl = atl;
@@ -185,10 +233,12 @@ function simulateFutureWeeks(ctl, atl, weeks = 6) {
   return out;
 }
 __name(simulateFutureWeeks, "simulateFutureWeeks");
+
 function statusColor(c) {
-  return c === "green" ? "\u{1F7E2}" : c === "yellow" ? "\u{1F7E1}" : c === "red" ? "\u{1F534}" : "\u26AA";
+  return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
 }
 __name(statusColor, "statusColor");
+
 function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
   const markers = [];
   markers.push({
@@ -202,7 +252,7 @@ function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
     color: eff > 0.01 ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
   });
   markers.push({
-    name: "Erm\xFCdungsresistenz",
+    name: "Ermüdungsresistenz",
     value: rec != null ? rec.toFixed(2) : "k.A.",
     color: rec >= 0.65 ? "green" : rec >= 0.6 ? "yellow" : "red"
   });
@@ -212,21 +262,23 @@ function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
   return { table, markers };
 }
 __name(buildStatusAmpel, "buildStatusAmpel");
+
 function buildPhaseRecommendation(runMarkers, rideMarkers) {
   const allRed = [...runMarkers, ...rideMarkers].filter((m) => m.color === "red");
-  if (!allRed.length) return "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F Aufbau \u2013 normale Trainingswoche beibehalten.";
+  if (!allRed.length) return "🏋️‍♂️ Aufbau – normale Trainingswoche beibehalten.";
   if (allRed.some((m) => m.name.includes("Aerobe")))
-    return "\u{1FAC0} Grundlage \u2013 aerobe Basis limitiert, Fokus auf GA1/Z2 Einheiten.";
+    return "🧬 Grundlage – aerobe Basis limitiert, Fokus auf GA1/Z2 Einheiten.";
   if (allRed.length > 1)
-    return "\u{1FAC0} Grundlage \u2013 mehrere Marker limitiert \u2192 ruhige Woche, Fokus auf aerobe Stabilit\xE4t.";
-  return "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F Aufbau \u2013 stabile Basis, Technik- oder Schwellenreize m\xF6glich.";
+    return "🧬 Grundlage – mehrere Marker limitiert → ruhige Woche, Fokus auf aerobe Stabilität.";
+  return "🏋️‍♂️ Aufbau – stabile Basis, Technik- oder Schwellenreize möglich.";
 }
 __name(buildPhaseRecommendation, "buildPhaseRecommendation");
+
 async function handle(dryRun = true) {
-  const today = /* @__PURE__ */ new Date();
+  const today = new Date();
   const isMonday = today.getUTCDay() === 1;
   if (!isMonday && !dryRun) {
-    console.log("\u26D4 Schreibschutz aktiv \u2014 kein Montag.");
+    console.log("⛔ Schreibschutz aktiv — kein Montag.");
     return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt", dryRun: true }, null, 2), { status: 200 });
   }
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
@@ -241,20 +293,25 @@ async function handle(dryRun = true) {
   const rec = well.recoveryIndex ?? 0.65;
   const start = new Date(monday);
   start.setUTCDate(start.getUTCDate() - 28);
+
   const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${today.toISOString().slice(0, 10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
+
+  // 🏁 Rennen erkennen und in der Konsole anzeigen
+  logRaceEvents(acts);
+
   const runActs = acts.filter((a) => a.type?.includes("Run"));
   const rideActs = acts.filter((a) => a.type?.includes("Ride"));
   const runDrift = await extractDriftStats(runActs, hrMax, auth);
   const rideDrift = await extractDriftStats(rideActs, hrMax, auth);
   const runEff = computeEfficiencyTrend(runActs, hrMax);
   const rideEff = computeEfficiencyTrend(rideActs, hrMax);
-  const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "\u{1F3C3}\u200D\u2642\uFE0F Laufen" });
-  const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "\u{1F6B4}\u200D\u2642\uFE0F Rad" });
+  const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
+  const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
   const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
   const progression = simulateFutureWeeks(ctl, atl, 6);
   const comment = [
-    "\u{1F3C1} **Status-Ampel (Heute)**",
+    "🏁 **Status-Ampel (Heute)**",
     "",
     runTable.table,
     "",
@@ -262,8 +319,9 @@ async function handle(dryRun = true) {
     "",
     `**Phase:** ${phase}`,
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
-    `**Vorschau:** ${progression.map((p) => `W${p.week}: ${p.weekType} \u2192 ${p.weekTss}`).join(", ")}`
+    `**Vorschau:** ${progression.map((p) => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`
   ].join("\n");
+
   if (DEBUG) console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression });
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
@@ -272,9 +330,11 @@ async function handle(dryRun = true) {
       body: JSON.stringify({ [COMMENT_FIELD]: comment })
     });
   }
+
   return new Response(JSON.stringify({ run: runTable, ride: rideTable, phase, progression, comment }, null, 2), { status: 200 });
 }
 __name(handle, "handle");
+
 var index_default = {
   async fetch(req) {
     const url = new URL(req.url);
@@ -282,10 +342,10 @@ var index_default = {
     return handle(!write);
   },
   async scheduled(_, __, ctx) {
-    if ((/* @__PURE__ */ new Date()).getUTCDay() === 1) ctx.waitUntil(handle(false));
+    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
   }
 };
+
 export {
   index_default as default
 };
-//# sourceMappingURL=index.js.map
