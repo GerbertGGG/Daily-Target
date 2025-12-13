@@ -1,6 +1,5 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
-
 // src/index.js
 var BASE_URL = "https://intervals.icu/api/v1";
 var API_KEY = "API_KEY";
