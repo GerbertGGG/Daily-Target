@@ -1,15 +1,15 @@
 /**
  * ============================================================
- * 🚀 IntervalsLimiterCoach_Final_RunRide_GA_Filter.js
+ * 🚀 IntervalsLimiterCoach_Final_v6.js
  * ============================================================
  * Features:
- *  ✅ Drift (PA:HR) mit GA-Filter (nur Grundlagenläufe/-fahrten)
- *  ✅ Getrennte Tabellen: Laufen + Radfahren
- *  ✅ Effizienztrend
- *  ✅ Phasenempfehlung
- *  ✅ Volle CTL/ATL/TSS Simulation (alte Logik)
- *  ✅ Kommentartext in Intervals
- *  ✅ Montagsschutz + Debug
+ * ✅ Alte CTL/ATL Simulation (Friel/TrainingPeaks)
+ * ✅ Drift: Lauf = PA:HR, Rad = PW:HR (mit Streams)
+ * ✅ GA-Filter (Z1/Z2 only, Dauer >40min, keine Intervalle)
+ * ✅ Effizienztrend: Lauf = Speed/HR, Rad Outdoor = Power/HR, Indoor = nur Power
+ * ✅ Getrennte Ampeltabellen für Lauf & Rad
+ * ✅ Phase & Wochen-TSS-Empfehlung
+ * ✅ Montagsschutz + Logging
  * ============================================================
  */
 
@@ -33,7 +33,7 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 Drift (PA:HR) mit GA-Filter
+// 🫀 GA-Filter
 // ============================================================
 function isGaSession(a, hrMax) {
   const type = (a.type || "").toLowerCase();
@@ -44,18 +44,23 @@ function isGaSession(a, hrMax) {
   const ifVal = a.IF ?? null;
   const name = (a.name || "").toLowerCase();
 
-  if (dur < 40 * 60) return false; // <40min ausschließen
+  // mind. 40min, 70–82% HFmax, keine Intervalle
+  if (dur < 40 * 60) return false;
   if (!hr || !hrMax) return false;
 
   const rel = hr / hrMax;
   if (rel < 0.7 || rel > 0.82) return false;
   if (ifVal && ifVal > 0.8) return false;
 
+  // Ausschluss: Intervalle, Tests, HIT
   if (/intervall|interval|schwelle|vo2|max|berg|test|30s|30\/15|15\/15/i.test(name)) return false;
 
   return true;
 }
 
+// ============================================================
+// 🧮 Driftberechnung
+// ============================================================
 async function computePaHrDecoupling(time, hr, velocity) {
   if (!time || !hr || !velocity) return null;
   const n = Math.min(time.length, hr.length, velocity.length);
@@ -67,14 +72,33 @@ async function computePaHrDecoupling(time, hr, velocity) {
   return Math.abs((rel2 - rel1) / rel1);
 }
 
-async function computeDriftFromStream(activityId, authHeader) {
+async function computePowerHrDecoupling(time, hr, power) {
+  if (!time || !hr || !power) return null;
+  const n = Math.min(time.length, hr.length, power.length);
+  if (n < 200) return null;
+  const mid = Math.floor(n / 2);
+  const rel1 = power.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
+  const rel2 = power.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
+  if (!rel1 || !isFinite(rel1)) return null;
+  return Math.abs((rel2 - rel1) / rel1);
+}
+
+async function computeDriftFromStream(a, authHeader) {
   try {
-    const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
+    const url = `${BASE_URL}/activity/${a.id}/streams.json?types=time,heartrate,velocity_smooth,watts_smooth,watts`;
     const res = await fetch(url, { headers: { Authorization: authHeader } });
     if (!res.ok) return null;
     const streams = await res.json();
     const get = (t) => streams.find(s => s.type === t)?.data ?? null;
-    return computePaHrDecoupling(get("time"), get("heartrate"), get("velocity_smooth"));
+    const time = get("time");
+    const hr = get("heartrate");
+    const vel = get("velocity_smooth");
+    const power = get("watts_smooth") || get("watts");
+
+    if (a.type?.includes("Ride") && power)
+      return computePowerHrDecoupling(time, hr, power);
+    else
+      return computePaHrDecoupling(time, hr, vel);
   } catch (e) {
     if (DEBUG) console.log("Drift Stream Error", e);
     return null;
@@ -99,11 +123,10 @@ async function extractDriftStats(activities, hrMax, authHeader) {
   for (const a of activities) {
     if (!isGaSession(a, hrMax)) continue;
     let drift = extractActivityDecoupling(a);
-    if (drift == null) drift = await computeDriftFromStream(a.id, authHeader);
+    if (drift == null) drift = await computeDriftFromStream(a, authHeader);
     if (drift != null) drifts.push(drift);
   }
   const med = median(drifts);
-  if (DEBUG) console.log(`Drift Median (${activities[0]?.type ?? "?"}):`, med);
   return { medianDrift: med, count: drifts.length };
 }
 
@@ -115,6 +138,25 @@ function computeEfficiency(a, hrMax) {
   if (!hr || !hrMax) return null;
   const rel = hr / hrMax;
   if (rel < 0.7 || rel > 0.82) return null;
+
+  const type = a.type?.toLowerCase() ?? "";
+  const isRide = type.includes("ride");
+  const isVirtual = type.includes("virtual");
+
+  if (isRide) {
+    // Power bevorzugen
+    const power = a.weighted_average_watts ?? a.avg_power ?? null;
+    if (power) return power / hr;
+
+    // nur Outdoor ohne Power ggf. Speed/HR
+    if (!isVirtual) {
+      const v = a.average_speed ?? a.avg_speed ?? null;
+      if (v) return v / hr;
+    }
+    return null;
+  }
+
+  // Lauf (Speed/HR)
   const v = a.average_speed ?? a.avg_speed ?? null;
   return v ? v / hr : null;
 }
@@ -134,12 +176,11 @@ function computeEfficiencyTrend(activities, hrMax) {
   const mLast = median(effLast);
   const mPrev = median(effPrev);
   const trend = mLast && mPrev ? (mLast - mPrev) / mPrev : 0;
-  if (DEBUG) console.log("EffTrend:", trend.toFixed(4));
   return trend;
 }
 
 // ============================================================
-// 🧮 CTL/ATL/TSS Simulation (alte Logik)
+// 🧮 CTL/ATL/TSS Simulation (Friel-Logic)
 // ============================================================
 const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
@@ -224,7 +265,7 @@ function statusColor(c) {
   return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
 }
 
-function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
+function buildStatusAmpel({ dec, eff, rec, sport }) {
   const markers = [];
   markers.push({
     name: "Aerobe Basis (Drift)",
@@ -232,7 +273,7 @@ function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
     color: dec == null ? "white" : dec < 0.05 ? "green" : dec < 0.07 ? "yellow" : "red"
   });
   markers.push({
-    name: "Effizienz (Speed/HR)",
+    name: "Effizienz (W/HR oder Speed/HR)",
     value: `${(eff * 100).toFixed(1)} %`,
     color: eff > 0.01 ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
   });
@@ -331,7 +372,4 @@ export default {
     const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
     return handle(!write);
   },
-  async scheduled(_, __, ctx) {
-    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
-  }
-};
+  async scheduled(_, __
