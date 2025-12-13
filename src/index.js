@@ -6,6 +6,8 @@ var BASE_URL = "https://intervals.icu/api/v1";
 var API_KEY = "API_KEY";
 var API_SECRET = "1xg1v04ym957jsqva8720oo01";
 var ATHLETE_ID = "i105857";
+
+// Feldnamen genau wie in Intervals
 var COMMENT_FIELD = "comments";
 var DEBUG = true;
 
@@ -124,46 +126,63 @@ __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
 // =========================
 // 🏁 Zukünftige Rennen (A-Rennen) aus dem Kalender abrufen
+// FIX: oldest/newest müssen lokale Datumsstrings YYYY-MM-DD sein (ohne UTC ISO)
 // =========================
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+__name(pad2, "pad2");
+
+function toLocalYMD(d) {
+  // Lokales Datum, kein UTC/ISO
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+__name(toLocalYMD, "toLocalYMD");
+
 async function fetchUpcomingRaces(authHeader) {
   const start = new Date();
   const end = new Date();
-  end.setUTCDate(start.getUTCDate() + 180); // 6 Monate nach vorn
+  end.setDate(start.getDate() + 180); // 6 Monate nach vorn (lokal)
 
-  const oldest = start.toISOString().slice(0, 10);
-  const newest = end.toISOString().slice(0, 10);
+  const oldest = toLocalYMD(start);
+  const newest = toLocalYMD(end);
 
   const url = `${BASE_URL}/athlete/${ATHLETE_ID}/events?oldest=${oldest}&newest=${newest}`;
   const res = await fetch(url, { headers: { Authorization: authHeader } });
 
   if (!res.ok) {
     if (DEBUG) console.log("⚠️ Event-API fehlgeschlagen:", res.status);
+    const t = await res.text().catch(() => "");
+    if (DEBUG && t) console.log("⚠️ Event-API Body:", t.slice(0, 400));
     return [];
   }
 
   const payload = await res.json();
-
-  // API kann Array ODER Objekt mit events liefern
   const events = Array.isArray(payload)
     ? payload
     : Array.isArray(payload?.events)
       ? payload.events
       : [];
 
-  // Nur A-Rennen: Kategorie = "A-Rennen" (oder Varianten wie "A Rennen", "A-Race", "A")
+  // Robust: API-Feld kann category / event_category / type heißen
   const races = events.filter((e) => {
     const cat = String(e.category ?? e.event_category ?? e.type ?? "").toLowerCase().trim();
-    return /^a(\s|-)?(rennen|race)?$/.test(cat);
+    // UI: "A-Rennen" -> API kann "A-Rennen", "A Rennen", "A", "A-Race" liefern
+    return /^a(\s|-)?(rennen|race)?$/.test(cat) || cat.includes("a-rennen") || cat.includes("a rennen");
   });
 
   if (DEBUG) {
-    if (races.length)
-      console.log(
-        `🏁 Gefundene A-Rennen (${races.length}):`,
-        races.map((r) => `${r.name} – ${(r.start_date_local || r.start_date || "").slice(0, 10)}`)
+    console.log(`🏁 Events gesamt: ${events.length} (oldest=${oldest}, newest=${newest})`);
+    const cats = [...new Set(events.map(e => String(e.category ?? e.event_category ?? e.type ?? "(none)")))];
+    console.log("🏁 Kategorien (unique):", cats);
+    if (races.length > 0) {
+      console.log(`🏁 Gefundene A-Rennen (${races.length}):`);
+      races.forEach(r =>
+        console.log(`- ${r.name} (${r.category ?? r.event_category ?? r.type}) am ${r.start_date_local || r.start_date}`)
       );
-    else
+    } else {
       console.log("⚪ Keine A-Rennen im Kalender gefunden.");
+    }
   }
 
   return races;
@@ -290,9 +309,7 @@ async function handle(dryRun = true) {
   monday.setUTCDate(today.getUTCDate() - (today.getUTCDay() + 6) % 7);
   const mondayStr = monday.toISOString().slice(0, 10);
 
-  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
-    headers: { Authorization: auth }
-  });
+  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
   const ctl = well.ctl ?? 60;
@@ -302,29 +319,21 @@ async function handle(dryRun = true) {
   // 📊 Aktivitäten der letzten 28 Tage
   const start = new Date();
   start.setUTCDate(start.getUTCDate() - 28);
-
-  const actRes = await fetch(
-    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
-    { headers: { Authorization: auth } }
-  );
+  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
 
   const runActs = acts.filter((a) => a.type?.includes("Run"));
   const rideActs = acts.filter((a) => a.type?.includes("Ride"));
-
   const runDrift = await extractDriftStats(runActs, hrMax, auth);
   const rideDrift = await extractDriftStats(rideActs, hrMax, auth);
-
   const runEff = computeEfficiencyTrend(runActs, hrMax);
   const rideEff = computeEfficiencyTrend(rideActs, hrMax);
-
   const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
   const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
-
   const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
-  // 🏁 Zukünftige A-Rennen abrufen
+  // 🏁 Zukünftige Rennen abrufen
   const raceEvents = await fetchUpcomingRaces(auth);
 
   let raceSummary = "⚪ Keine geplanten A-Rennen im nächsten halben Jahr.";
