@@ -370,3 +370,10 @@ async function handle(dryRun = true) {
 export default {
   async fetch(req) {
     const url = new URL(req.url);
+        const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
+    return handle(!write);
+  },
+  async scheduled(_, __, ctx) {
+    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
+  }
+};
