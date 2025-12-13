@@ -9,6 +9,9 @@ var ATHLETE_ID = "i105857";
 var COMMENT_FIELD = "comments";
 var DEBUG = true;
 
+// =========================
+// 📊 Hilfsfunktionen
+// =========================
 function median(values) {
   if (!values?.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -119,50 +122,49 @@ function computeEfficiencyTrend(activities, hrMax) {
 }
 __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
-// 🏁 Rennen erkennen (inkl. geplante)
-// 🏁 Rennen erkennen (inkl. Kategorie & geplante)
-function logRaceEvents(activities) {
-  const raceEvents = activities.filter(a => {
-    const name = (a.name || "").toLowerCase();
-    const type = (a.type || "").toLowerCase();
-    const category = (a.category || a.category_name || "").toLowerCase();
-    const desc = (a.description || "").toLowerCase();
+// =========================
+// 📅 Neue Funktion: Kalendereinträge (zukünftige Rennen)
+// =========================
+async function fetchUpcomingRaces(authHeader) {
+  const start = new Date();
+  const end = new Date();
+  end.setUTCDate(start.getUTCDate() + 180); // 6 Monate nach vorn
 
+  const url = `${BASE_URL}/athlete/${ATHLETE_ID}/calendar?oldest=${start.toISOString().slice(0,10)}&newest=${end.toISOString().slice(0,10)}`;
+  const res = await fetch(url, { headers: { Authorization: authHeader } });
+  if (!res.ok) {
+    if (DEBUG) console.log("⚠️ Kalender-API fehlgeschlagen:", res.status);
+    return [];
+  }
+
+  const entries = await res.json();
+  const races = entries.filter(e => {
+    const cat = (e.category || "").toLowerCase();
+    const name = (e.name || "").toLowerCase();
     return (
-      // 🏁 Kategorie enthält Rennen (z. B. "A-Rennen", "B-Rennen", "C-Rennen")
-      category.includes("rennen") ||
-      // 🏃‍♂️ Name oder Beschreibung enthält typische Rennbegriffe
+      cat.includes("rennen") ||
       name.includes("rennen") ||
-      name.includes("lauf") ||          // erkennt "AOK Lauf", "Silvesterlauf" etc.
-      name.includes("race") ||
+      name.includes("lauf") ||
       name.includes("marathon") ||
       name.includes("triathlon") ||
-      name.includes("ironman") ||
-      name.includes("tt") ||
-      name.includes("competition") ||
-      desc.includes("rennen") ||
-      // 🚴‍♂️ Typische Event-Typen (falls API Race liefert)
-      type.includes("race")
+      name.includes("ironman")
     );
   });
 
-  if (DEBUG && raceEvents.length > 0) {
-    console.log("🏁 Geplante oder vergangene Rennen gefunden:");
-    raceEvents.forEach((r, i) => {
-      console.log(
-        `#${i + 1}: ${r.name} | Kategorie: ${r.category || r.category_name || "-"} | Typ: ${r.type} | Datum: ${r.start_date_local || r.start_date
-        } | Distanz: ${(r.distance / 1000).toFixed(1)} km | TSS: ${r.icu_training_load || "?"}`
-      );
-    });
-  } else if (DEBUG) {
-    console.log("⚪ Keine Rennen im Zeitraum gefunden.");
+  if (DEBUG) {
+    if (races.length)
+      console.log(`🏁 Gefundene geplante Rennen (${races.length}):`, races.map(r => `${r.name} – ${r.start_date_local || r.start_date}`));
+    else
+      console.log("⚪ Keine geplanten Rennen im Kalender gefunden.");
   }
 
-  return raceEvents;
+  return races;
 }
-__name(logRaceEvents, "logRaceEvents");
+__name(fetchUpcomingRaces, "fetchUpcomingRaces");
 
-  
+// =========================
+// 📈 Trainingslogik
+// =========================
 var CTL_DELTA_TARGET = 0.8;
 var ACWR_SOFT_MAX = 1.3;
 var ACWR_HARD_MAX = 1.5;
@@ -205,32 +207,11 @@ function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
 }
 __name(computeWeekFromCtlDelta, "computeWeekFromCtlDelta");
 
-function computeDeloadWeek(ctl, atl) {
-  const tssMean = DELOAD_FACTOR * ctl;
-  const weekTss = tssMean * 7;
-  const ctlDelta = (tssMean - ctl) / 6;
-  const nextCtl = ctl + ctlDelta;
-  const nextAtl = tssMean;
-  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
-  return { weekType: "DELOAD", ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
-}
-__name(computeDeloadWeek, "computeDeloadWeek");
-
-function calcNextWeekTarget(ctl, atl) {
-  if (shouldDeload(ctl, atl)) return computeDeloadWeek(ctl, atl);
-  const dMaxSafe = maxSafeCtlDelta(ctl);
-  let targetDelta = CTL_DELTA_TARGET;
-  if (dMaxSafe <= 0) targetDelta = 0;
-  else if (dMaxSafe < targetDelta) targetDelta = dMaxSafe;
-  return computeWeekFromCtlDelta(ctl, atl, targetDelta);
-}
-__name(calcNextWeekTarget, "calcNextWeekTarget");
-
 function simulateFutureWeeks(ctl, atl, weeks = 6) {
   const out = [];
   let currentCtl = ctl, currentAtl = atl;
   for (let w = 1; w <= weeks; w++) {
-    const res = calcNextWeekTarget(currentCtl, currentAtl);
+    const res = computeWeekFromCtlDelta(currentCtl, currentAtl, 0.8);
     out.push({
       week: w,
       weekType: res.weekType,
@@ -251,7 +232,7 @@ function statusColor(c) {
 }
 __name(statusColor, "statusColor");
 
-function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
+function buildStatusAmpel({ dec, eff, rec, sport }) {
   const markers = [];
   markers.push({
     name: "Aerobe Basis (Drift)",
@@ -286,14 +267,14 @@ function buildPhaseRecommendation(runMarkers, rideMarkers) {
 }
 __name(buildPhaseRecommendation, "buildPhaseRecommendation");
 
+// =========================
+// 🧠 Hauptlogik
+// =========================
 async function handle(dryRun = true) {
   const today = new Date();
-  const isMonday = today.getUTCDay() === 1;
-  if (!isMonday && !dryRun) {
-    console.log("⛔ Schreibschutz aktiv — kein Montag.");
-    return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt", dryRun: true }, null, 2), { status: 200 });
-  }
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
+
+  // 📈 Wellnessdaten
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - (today.getUTCDay() + 6) % 7);
   const mondayStr = monday.toISOString().slice(0, 10);
@@ -304,19 +285,11 @@ async function handle(dryRun = true) {
   const atl = well.atl ?? 65;
   const rec = well.recoveryIndex ?? 0.65;
 
-  // 🔮 Zeitraum: von heute bis +180 Tage
+  // 📊 Aktivitäten der letzten 28 Tage
   const start = new Date();
-  const end = new Date();
-  end.setUTCDate(start.getUTCDate() + 180);
-
-  const actRes = await fetch(
-    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${end.toISOString().slice(0, 10)}`,
-    { headers: { Authorization: auth } }
-  );
+  start.setUTCDate(start.getUTCDate() - 28);
+  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
-
-  // 🏁 Rennen erkennen
-  const raceEvents = logRaceEvents(acts);
 
   const runActs = acts.filter((a) => a.type?.includes("Run"));
   const rideActs = acts.filter((a) => a.type?.includes("Ride"));
@@ -329,17 +302,16 @@ async function handle(dryRun = true) {
   const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
-  // 📝 Rennen in Textform in Kommentar aufnehmen
+  // 🏁 Zukünftige Rennen abrufen
+  const raceEvents = await fetchUpcomingRaces(auth);
+
   let raceSummary = "⚪ Keine geplanten Rennen im nächsten halben Jahr.";
   if (raceEvents.length > 0) {
-    raceSummary = raceEvents
-      .map((r, i) => {
-        const date = (r.start_date_local || r.start_date || "").slice(0, 10);
-        const dist = r.distance ? (r.distance / 1000).toFixed(1) + " km" : "–";
-        const tss = r.icu_training_load || "?";
-        return `${i + 1}. ${r.name} (${date}) – ${dist} – ${tss} TSS`;
-      })
-      .join("\n");
+    raceSummary = raceEvents.map((r, i) => {
+      const date = (r.start_date_local || r.start_date || "").slice(0, 10);
+      const dist = r.distance ? (r.distance / 1000).toFixed(1) + " km" : "–";
+      return `${i + 1}. ${r.name} (${date}) – ${dist}`;
+    }).join("\n");
   }
 
   const comment = [
@@ -351,7 +323,7 @@ async function handle(dryRun = true) {
     "",
     `**Phase:** ${phase}`,
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
-    `**Vorschau:** ${progression.map((p) => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`,
+    `**Vorschau:** ${progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`,
     "",
     "🏁 **Geplante Rennen (nächste 6 Monate):**",
     raceSummary
@@ -381,6 +353,4 @@ var index_default = {
   }
 };
 
-export {
-  index_default as default
-};
+export { index_default as default };
