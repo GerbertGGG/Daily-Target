@@ -367,3 +367,60 @@ async function handle(dryRun = true) {
     : `ℹ️ Kein aktives Event – Werte kombiniert (Lauf + Rad).`;
 
   const commentBlocks = [eventNote,
+    ];
+
+  // --- Sport-abhängige Tabellen hinzufügen ---
+  if (activeSport === "run" || activeSport === "both") {
+    commentBlocks.push("", "🏃‍♂️ **Laufen**", runTable.table);
+  }
+  if (activeSport === "ride" || activeSport === "both") {
+    commentBlocks.push("", "🚴‍♂️ **Rad**", rideTable.table);
+  }
+
+  commentBlocks.push(
+    "",
+    `**Phase:** ${phase}`,
+    `**Wochentarget TSS:** ${progression[0].weekTss}`,
+    `**Vorschau:** ${progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`
+  );
+
+  const comment = commentBlocks.join("\n");
+
+  // --- Schreiben in Intervals ---
+  if (!dryRun) {
+    await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
+      method: "PUT",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ [COMMENT_FIELD]: comment })
+    });
+  }
+
+  const result = {
+    event: upcomingEvent
+      ? { name: upcomingEvent.name, type: upcomingEvent.type, date: upcomingEvent.start_date_local }
+      : null,
+    activeSport,
+    run: runTable,
+    ride: rideTable,
+    phase,
+    progression,
+    comment
+  };
+
+  if (DEBUG) console.log(JSON.stringify(result, null, 2));
+  return new Response(JSON.stringify(result, null, 2), { status: 200 });
+}
+
+// ============================================================
+// 🧩 Export + Scheduler
+// ============================================================
+export default {
+  async fetch(req) {
+    const url = new URL(req.url);
+    const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
+    return handle(!write);
+  },
+  async scheduled(_, __, ctx) {
+    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
+  }
+};
