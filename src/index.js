@@ -1,5 +1,6 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
 // src/index.js
 var BASE_URL = "https://intervals.icu/api/v1";
 var API_KEY = "API_KEY";
@@ -160,28 +161,17 @@ async function fetchUpcomingRaces(authHeader) {
       ? payload.events
       : [];
 
-  // Nur A-Rennen: Kategorie = "A-Rennen" (oder Varianten)
-  const races = events.filter((e) => {
-    const cat = String(e.category ?? e.event_category ?? e.type ?? "").toLowerCase().trim();
-    // trifft "A-Rennen", "A Rennen", "A-Race", "A", "Race A", "race_a"
-    return (
-      /^a(\s|-)?(rennen|race)?$/.test(cat) ||
-      /^race(\s|-|_)?a$/.test(cat) ||
-      cat.includes("a-rennen") ||
-      cat.includes("a rennen") ||
-      cat === "race a" ||
-      cat === "race_a"
-    );
-  });
+  // ✅ Exakt: A-Rennen = category "RACE_A" (so wie deine API liefert)
+  const races = events.filter((e) => String(e.category ?? "").toUpperCase() === "RACE_A");
 
   if (DEBUG) {
     console.log(`🏁 Events gesamt: ${events.length} (oldest=${oldest}, newest=${newest})`);
-    const cats = [...new Set(events.map(e => String(e.category ?? e.event_category ?? e.type ?? "(none)")))];
+    const cats = [...new Set(events.map(e => String(e.category ?? "(none)")))];
     console.log("🏁 Kategorien (unique):", cats);
     if (races.length) {
       console.log(`🏁 Gefundene A-Rennen (${races.length}):`);
       races.forEach(r =>
-        console.log(`- ${r.name} (${r.category ?? r.event_category ?? r.type}) am ${r.start_date_local || r.start_date}`)
+        console.log(`- ${r.name} (${r.category}) am ${r.start_date_local || r.start_date}`)
       );
     } else {
       console.log("⚪ Keine A-Rennen im Kalender gefunden.");
@@ -301,7 +291,7 @@ function buildPhaseRecommendation(runMarkers, rideMarkers) {
 __name(buildPhaseRecommendation, "buildPhaseRecommendation");
 
 // =========================
-// 🏁 Nächstes Rennen bestimmen + Sport erkennen
+// 🏁 Nächstes Rennen bestimmen + Sport erkennen (simplified via type)
 // =========================
 function parseEventDateMs(e) {
   const s = e?.start_date_local || e?.start_date || "";
@@ -321,28 +311,9 @@ function getNextRace(races) {
 __name(getNextRace, "getNextRace");
 
 function detectRaceSport(e) {
-  if (!e) return null;
-
-  // 1) Best case: echtes Sport-Feld (z.B. "Laufen")
-  const s = String(e.sport ?? "").toLowerCase();
-  const t = String(e.type ?? "").toLowerCase();
-  const name = String(e.name ?? "").toLowerCase();
-
-  if (s.includes("lauf") || s.includes("run") || t.includes("run")) return "run";
-  if (s.includes("rad") || s.includes("ride") || s.includes("bike") || t.includes("ride")) return "ride";
-  if (s.includes("swim") || s.includes("schwimm") || t.includes("swim")) return "swim";
-
-  // 2) Fallback: Name
-  if (/lauf|run|marathon|halbmarathon|10km|5km/.test(name)) return "run";
-  if (/rad|bike|cycle|cycling/.test(name)) return "ride";
-  if (/triathlon|ironman/.test(name)) return "triathlon";
-
-  // 3) Fallback: Distanz (Meter)
-  if (typeof e.distance === "number") {
-    if (e.distance <= 60000) return "run";
-    if (e.distance >= 80000) return "ride";
-  }
-
+  const t = String(e?.type ?? "").toLowerCase();
+  if (t.includes("run")) return "run";
+  if (t.includes("ride")) return "ride";
   return null;
 }
 __name(detectRaceSport, "detectRaceSport");
@@ -358,6 +329,7 @@ async function handle(dryRun = true) {
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - (today.getUTCDay() + 6) % 7);
   const mondayStr = monday.toISOString().slice(0, 10);
+
   const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
@@ -368,18 +340,17 @@ async function handle(dryRun = true) {
   // 📊 Aktivitäten der letzten 28 Tage
   const start = new Date();
   start.setUTCDate(start.getUTCDate() - 28);
-  const actRes = await fetch(
-    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
-    { headers: { Authorization: auth } }
-  );
+  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
 
   const runActs = acts.filter((a) => a.type?.includes("Run"));
   const rideActs = acts.filter((a) => a.type?.includes("Ride"));
+
   const runDrift = await extractDriftStats(runActs, hrMax, auth);
   const rideDrift = await extractDriftStats(rideActs, hrMax, auth);
   const runEff = computeEfficiencyTrend(runActs, hrMax);
   const rideEff = computeEfficiencyTrend(rideActs, hrMax);
+
   const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
   const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
 
@@ -432,7 +403,7 @@ async function handle(dryRun = true) {
 
   if (DEBUG) {
     console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression, raceEvents });
-    console.log("🏁 Next race:", nextRace?.name, "sport=", nextRaceSport, "date=", nextRace?.start_date_local || nextRace?.start_date);
+    console.log("🏁 Next race:", nextRace?.name, "type=", nextRace?.type, "sport=", nextRaceSport, "date=", nextRace?.start_date_local || nextRace?.start_date);
   }
 
   if (!dryRun) {
