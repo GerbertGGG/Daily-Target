@@ -1,9 +1,9 @@
 /**
  * ============================================================
- * IntervalsLimiterCoach v12 – Planned Races Edition (Final)
+ * IntervalsLimiterCoach v12 – Planned Races Edition (Final + Debug)
  * ============================================================
  * Features:
- * ✅ Geplante Rennen (planned=true, type=race, discipline)
+ * ✅ Geplante Rennen (planned=true, type=race, discipline) via /athlete/me/events
  * ✅ A-Race aware (discipline → Run / Ride / Triathlon / Duathlon)
  * ✅ GA-Filter (Run≥40min, Ride≥50min, HF 70–82 %, 68–80 %, VI≤1.15, keine Intervalle)
  * ✅ VirtualRide erlaubt, solange keine Intervalle
@@ -11,6 +11,7 @@
  * ✅ CTL/ATL/TSS Simulation (Friel)
  * ✅ Montagsschutz (nur montags schreiben)
  * ✅ Ampel-Tabelle + Coaching-Kommentar
+ * ✅ DEBUG: Event-Shape + Normalisierung + Filtergründe + Response-Debug
  * ============================================================
  */
 
@@ -249,6 +250,104 @@ function buildPhaseRecommendation(runMarkers, rideMarkers) {
 }
 
 // ============================================================
+// 🏁 Events: Fetch + Normalize + Debug
+// ============================================================
+function debugEventShape(events, limit = 5) {
+  return (events || []).slice(0, limit).map(e => ({
+    id: e.id,
+    name: e.name || e.title,
+    start_date_local: e.start_date_local,
+    start_date: e.start_date,
+    date: e.date,
+    type: e.type,
+    discipline: e.discipline,
+    sport: e.sport,
+    activity_type: e.activity_type,
+    category: e.category,
+    planned: e.planned,
+    completed: e.completed,
+    status: e.status
+  }));
+}
+
+async function fetchPlannedRaces(authHeader) {
+  // A) exakt dein Call (Kalenderjahr 2025)
+  const urlA = `${BASE_URL}/athlete/me/events?oldest=2025-01-01&newest=2025-12-31&planned=true&type=race`;
+
+  // B) fallback: ab heute 12 Monate
+  const today = new Date();
+  const oldestB = today.toISOString().slice(0, 10);
+  const newestB = new Date(today);
+  newestB.setFullYear(newestB.getFullYear() + 1);
+  const urlB = `${BASE_URL}/athlete/me/events?oldest=${oldestB}&newest=${newestB.toISOString().slice(0, 10)}&planned=true&type=race`;
+
+  async function tryFetch(url) {
+    const res = await fetch(url, { headers: { Authorization: authHeader } });
+
+    // Debug: status + body (auch wenn kein JSON)
+    let bodyText = "";
+    try { bodyText = await res.text(); } catch {}
+
+    if (DEBUG) {
+      console.log("[events] GET", url);
+      console.log("[events] status", res.status);
+      console.log("[events] body", bodyText?.slice(0, 2000));
+    }
+
+    if (!res.ok) return null;
+
+    // parse
+    let json = null;
+    try { json = bodyText ? JSON.parse(bodyText) : null; } catch { json = null; }
+
+    if (Array.isArray(json)) return json;
+    if (json && Array.isArray(json.events)) return json.events;
+
+    // wenn die API wirklich leer/anders ist, lieber leeres Array als Crash
+    return [];
+  }
+
+  let events = await tryFetch(urlA);
+  if (events == null) events = await tryFetch(urlB);
+  if (events == null) return [];
+
+  return events;
+}
+
+function normalizeRaceEvent(e) {
+  const dateStr =
+    e.start_date_local ||
+    e.start_date ||
+    e.date ||
+    e.start ||
+    null;
+
+  const start = dateStr ? new Date(dateStr) : null;
+
+  const disciplineRaw =
+    e.discipline ||
+    e.sport ||
+    e.activity_type ||
+    e.type || // fallback
+    "";
+
+  const completed =
+    Boolean(e.completed) ||
+    String(e.status || "").toLowerCase() === "completed" ||
+    false;
+
+  return {
+    raw: e,
+    id: e.id,
+    name: e.name || e.title || "Race",
+    start_date_local: e.start_date_local || e.start_date || e.date || null,
+    start,
+    completed,
+    discipline: String(disciplineRaw).toLowerCase(),
+  };
+}
+
+// ============================================================
 // MAIN
 // ============================================================
 async function handle(dryRun = true) {
@@ -258,6 +357,7 @@ async function handle(dryRun = true) {
     return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt" }, null, 2));
 
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
+
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
   const mondayStr = monday.toISOString().slice(0, 10);
@@ -271,31 +371,58 @@ async function handle(dryRun = true) {
   const rec = well.recoveryIndex ?? 0.65;
 
   // ============================================================
-  // 🏁 Geplante Rennen (12 Monate)
+  // 🏁 Geplante Rennen (robust über /athlete/me/events)
   // ============================================================
-  const oldest = new Date();
-  const newest = new Date();
-  newest.setFullYear(newest.getFullYear() + 1);
+  const plannedEventsRaw = await fetchPlannedRaces(auth);
 
-  const evUrl = `${BASE_URL}/athlete/${ATHLETE_ID}/events?oldest=${oldest.toISOString().slice(0,10)}&newest=${newest.toISOString().slice(0,10)}&planned=true&type=race`;
-  const evRes = await fetch(evUrl, { headers: { Authorization: auth } });
+  if (DEBUG) {
+    console.log("========== RAW EVENTS (first 5) ==========");
+    console.log(JSON.stringify(debugEventShape(plannedEventsRaw), null, 2));
+  }
 
-  const plannedEvents = evRes.ok ? await evRes.json() : [];
+  const plannedEvents = (plannedEventsRaw || [])
+    .map(normalizeRaceEvent)
+    .filter(x => x.start && !isNaN(x.start.getTime()));
+
+  if (DEBUG) {
+    console.log("========== NORMALIZED EVENTS ==========");
+    console.log(JSON.stringify(
+      plannedEvents.map(e => ({
+        name: e.name,
+        start: e.start?.toISOString?.() ?? null,
+        discipline: e.discipline,
+        completed: e.completed,
+      })),
+      null,
+      2
+    ));
+  }
+
   const raceEvents = plannedEvents
-    .filter(e => !e.completed && e.start_date_local)
-    .map(e => ({
-      ...e,
-      start: new Date(e.start_date_local),
-      discipline: (e.discipline || e.type || "").toLowerCase()
-    }))
+    .filter(e => !e.completed)
     .filter(e => e.start >= today)
-    .sort((a,b) => a.start - b.start);
+    .sort((a, b) => a.start - b.start);
+
+  if (DEBUG && raceEvents.length === 0) {
+    console.log("⚠️ NO UPCOMING RACE FOUND");
+    console.log("today =", today.toISOString());
+    console.log(JSON.stringify(
+      plannedEvents.map(e => ({
+        name: e.name,
+        start: e.start?.toISOString?.() ?? null,
+        completed: e.completed,
+        discipline: e.discipline
+      })),
+      null,
+      2
+    ));
+  }
 
   const upcomingEvent = raceEvents[0] || null;
 
   let activeSport = "both";
   if (upcomingEvent) {
-    const disc = upcomingEvent.discipline;
+    const disc = upcomingEvent.discipline || "";
     if (disc.includes("run")) activeSport = "run";
     else if (disc.includes("ride") || disc.includes("bike")) activeSport = "ride";
     else if (disc.includes("tri") || disc.includes("duat")) activeSport = "both";
@@ -306,7 +433,11 @@ async function handle(dryRun = true) {
   // ============================================================
   const start = new Date(monday);
   start.setUTCDate(start.getUTCDate() - 28);
-  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
+
+  const actRes = await fetch(
+    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
+    { headers: { Authorization: auth } }
+  );
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
   const rideActs = acts.filter(a => a.type?.includes("Ride"));
@@ -328,7 +459,7 @@ async function handle(dryRun = true) {
 
   // Kommentar
   const eventNote = upcomingEvent
-    ? `🎯 Geplantes Rennen erkannt: ${upcomingEvent.name} (${upcomingEvent.discipline}) am ${upcomingEvent.start_date_local.slice(0,10)}`
+    ? `🎯 Geplantes Rennen erkannt: ${upcomingEvent.name} (${upcomingEvent.discipline}) am ${String(upcomingEvent.start_date_local).slice(0,10)}`
     : `ℹ️ Kein geplantes Rennen gefunden – allgemeine Trainingsphase (Run + Ride kombiniert).`;
 
   const commentBlocks = [eventNote];
@@ -356,7 +487,20 @@ async function handle(dryRun = true) {
   }
 
   const result = {
-    event: upcomingEvent ? { name: upcomingEvent.name, discipline: upcomingEvent.discipline, date: upcomingEvent.start_date_local } : null,
+    event: upcomingEvent
+      ? { name: upcomingEvent.name, discipline: upcomingEvent.discipline, date: upcomingEvent.start_date_local }
+      : null,
+
+    debug: DEBUG ? {
+      rawEventCount: (plannedEventsRaw || []).length,
+      normalizedEventCount: plannedEvents.length,
+      upcomingCandidates: raceEvents.map(e => ({
+        name: e.name,
+        date: e.start?.toISOString?.() ?? null,
+        discipline: e.discipline
+      }))
+    } : undefined,
+
     activeSport,
     run: runTable,
     ride: rideTable,
@@ -365,10 +509,8 @@ async function handle(dryRun = true) {
     comment
   };
 
-  // Kommentar zurückgeben
   if (DEBUG) console.log(JSON.stringify(result, null, 2));
 
-  // ✅ Rückgabe bleibt innerhalb der Funktion
   return new Response(JSON.stringify(result, null, 2), { status: 200 });
 }
 
