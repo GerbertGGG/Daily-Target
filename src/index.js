@@ -183,8 +183,6 @@ async function fetchUpcomingRaces(authHeader) {
 
   return races;
 }
-__name(fetchUpcomingRaces, "fetchUpcomingRaces");
-
   const entries = await res.json();
   const races = entries.filter(e => {
     const cat = (e.category || "").toLowerCase();
