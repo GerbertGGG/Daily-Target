@@ -142,7 +142,11 @@ __name(toLocalYMD, "toLocalYMD");
 async function fetchUpcomingRaces(authHeader) {
   const start = new Date();
   const end = new Date();
-  end.setDate(start.getDate() + 180); // 6 Monate nach vorn (lokal)
+  end.setDate(start.getDate() + 180);
+
+  // local YYYY-MM-DD (nicht toISOString/UTC)
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const toLocalYMD = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
   const oldest = toLocalYMD(start);
   const newest = toLocalYMD(end);
@@ -153,36 +157,41 @@ async function fetchUpcomingRaces(authHeader) {
   if (!res.ok) {
     if (DEBUG) console.log("⚠️ Event-API fehlgeschlagen:", res.status);
     const t = await res.text().catch(() => "");
-    if (DEBUG && t) console.log("⚠️ Event-API Body:", t.slice(0, 400));
+    if (DEBUG && t) console.log("⚠️ Body:", t.slice(0, 400));
     return [];
   }
 
   const payload = await res.json();
-  const events = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.events)
-      ? payload.events
-      : [];
+  const events = Array.isArray(payload) ? payload : (payload?.events ?? []);
 
-  // Robust: API-Feld kann category / event_category / type heißen
-  const races = events.filter((e) => {
-    const cat = String(e.category ?? e.event_category ?? e.type ?? "").toLowerCase().trim();
-    // UI: "A-Rennen" -> API kann "A-Rennen", "A Rennen", "A", "A-Race" liefern
-    return /^a(\s|-)?(rennen|race)?$/.test(cat) || cat.includes("a-rennen") || cat.includes("a rennen");
-  });
-
+  // ✅ Debug: erst mal sehen, was wirklich kommt
   if (DEBUG) {
     console.log(`🏁 Events gesamt: ${events.length} (oldest=${oldest}, newest=${newest})`);
     const cats = [...new Set(events.map(e => String(e.category ?? e.event_category ?? e.type ?? "(none)")))];
-    console.log("🏁 Kategorien (unique):", cats);
-    if (races.length > 0) {
-      console.log(`🏁 Gefundene A-Rennen (${races.length}):`);
-      races.forEach(r =>
-        console.log(`- ${r.name} (${r.category ?? r.event_category ?? r.type}) am ${r.start_date_local || r.start_date}`)
-      );
-    } else {
-      console.log("⚪ Keine A-Rennen im Kalender gefunden.");
-    }
+    console.log("🏁 Kategorien:", cats);
+    console.log("🏁 Sample:", events[0]);
+  }
+
+  const isRaceA = (catRaw) => {
+    const c = String(catRaw ?? "").toLowerCase().trim();
+    // trifft: "A-Rennen", "A Rennen", "Race A", "Race-A", "RACE_A", "race_a"
+    return (
+      /^a(\s|-)?rennen$/.test(c) ||
+      /^race(\s|-|_)?a$/.test(c) ||
+      c === "race a" ||
+      c === "race_a" ||
+      c === "a"
+    );
+  };
+
+  const races = events.filter(e => {
+    const cat = e.category ?? e.event_category ?? e.type ?? "";
+    return isRaceA(cat);
+  });
+
+  if (DEBUG) {
+    console.log(`🏁 Gefundene A-Rennen: ${races.length}`);
+    races.forEach(r => console.log("-", r.name, r.category ?? r.event_category ?? r.type, r.start_date_local ?? r.start_date));
   }
 
   return races;
