@@ -1,9 +1,20 @@
+/**
+ * ============================================================
+ * 🧠 IntervalsLimiterWorker.js
+ * Autor: CoachGPT (Intervals icu Training Coach v3.0)
+ * ------------------------------------------------------------
+ * Funktion:
+ *  - Automatische Phasen- und Limitierer-Erkennung
+ *  - Kommentar-Schreibung in Intervals.icu (Feld: comments)
+ *  - Voll kompatibel mit Unified Reporting Framework v5.1
+ * ============================================================
+ */
+
 const BASE_URL = "https://intervals.icu/api/v1";
 const API_KEY = "API_KEY";
 const API_SECRET = "1xg1v04ym957jsqva8720oo01";
 const ATHLETE_ID = "i105857";
 
-// Feldnamen genau wie in Intervals
 const WEEKLY_TARGET_FIELD = "WochenzielTSS";
 const PLAN_FIELD = "WochenPlan";
 const COMMENT_FIELD = "comments";
@@ -12,11 +23,9 @@ const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
 const ACWR_HARD_MAX = 1.5;
 const DELOAD_FACTOR = 0.9;
-
-// Effizienz-Upgrade Gate (nicht strenger): +1% in 14 Tagen
 const EFF_TREND_UPGRADE_MIN = 0.01;
 
-// ---------------- CTL / ATL / ACWR ----------------
+// ---------------- Helper Functions ----------------
 
 function getAtlMax(ctl) {
   if (ctl < 30) return 30;
@@ -25,583 +34,210 @@ function getAtlMax(ctl) {
   return 85;
 }
 function isUtcMonday() {
-  const now = new Date();
-  return now.getUTCDay() === 1; // 1 = Monday
+  return new Date().getUTCDay() === 1;
 }
 function shouldDeload(ctl, atl) {
   const atlMax = getAtlMax(ctl);
-  let acwr = null;
-  if (ctl > 0) acwr = atl / ctl;
-  if (acwr != null && acwr >= ACWR_HARD_MAX) return true;
-  if (atl > atlMax) return true;
-  return false;
+  const acwr = ctl > 0 ? atl / ctl : 1.0;
+  return acwr >= ACWR_HARD_MAX || atl > atlMax;
 }
-
 function maxSafeCtlDelta(ctl) {
   if (ctl <= 0) return CTL_DELTA_TARGET;
-  const numerator = (ACWR_SOFT_MAX - 1) * ctl;
-  const denominator = 6 - ACWR_SOFT_MAX;
-  const d = numerator / denominator;
-  if (!isFinite(d) || d <= 0) return 0;
-  return d;
+  const d = ((ACWR_SOFT_MAX - 1) * ctl) / (6 - ACWR_SOFT_MAX);
+  return !isFinite(d) || d <= 0 ? 0 : d;
 }
-
 function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   const tssMean = ctl + 6 * ctlDelta;
   const weekTss = tssMean * 7;
   const nextCtl = ctl + ctlDelta;
   const nextAtl = tssMean;
-  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
+  const acwr = nextCtl > 0 ? nextAtl / nextCtl : 1;
   const weekType =
-    ctlDelta > 0 ? "BUILD" : (ctlDelta < 0 ? "DELOAD" : "MAINTAIN");
+    ctlDelta > 0 ? "BUILD" : ctlDelta < 0 ? "DELOAD" : "MAINTAIN";
   return { weekType, ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
 }
-
-function computeDeloadWeek(ctl, atl) {
+function computeDeloadWeek(ctl) {
   const tssMean = DELOAD_FACTOR * ctl;
   const weekTss = tssMean * 7;
   const ctlDelta = (tssMean - ctl) / 6;
   const nextCtl = ctl + ctlDelta;
-  const nextAtl = tssMean;
-  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
-  return { weekType: "DELOAD", ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
+  const acwr = nextCtl > 0 ? tssMean / nextCtl : 1;
+  return { weekType: "DELOAD", ctlDelta, weekTss, nextCtl, acwr };
 }
-
 function calcNextWeekTarget(ctl, atl) {
-  if (shouldDeload(ctl, atl)) return computeDeloadWeek(ctl, atl);
+  if (shouldDeload(ctl, atl)) return computeDeloadWeek(ctl);
   const dMaxSafe = maxSafeCtlDelta(ctl);
-  let targetDelta = CTL_DELTA_TARGET;
-  if (dMaxSafe <= 0) targetDelta = 0;
-  else if (dMaxSafe < targetDelta) targetDelta = dMaxSafe;
-  return computeWeekFromCtlDelta(ctl, atl, targetDelta);
+  let delta = Math.min(dMaxSafe, CTL_DELTA_TARGET);
+  return computeWeekFromCtlDelta(ctl, atl, delta);
+}
+function median(v) {
+  if (!v || !v.length) return null;
+  const s = [...v].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
 }
 
-function simulateFutureWeeks(ctl, atl, mondayDate, weeks, firstWeekPlan) {
-  const out = [];
-  let currentCtl = firstWeekPlan.nextCtl;
-  let currentAtl = firstWeekPlan.nextAtl;
-  for (let w = 1; w <= weeks; w++) {
-    const res = calcNextWeekTarget(currentCtl, currentAtl);
-    const future = new Date(mondayDate);
-    future.setUTCDate(future.getUTCDate() + 7 * w);
-    const mondayStr = future.toISOString().slice(0, 10);
-    out.push({
-      weekOffset: w,
-      monday: mondayStr,
-      weekType: res.weekType,
-      weeklyTargetTss: Math.round(res.weekTss),
-      ctl: res.nextCtl,
-      atl: res.nextAtl,
-      ctlDelta: res.ctlDelta,
-      acwr: res.acwr
-    });
-    currentCtl = res.nextCtl;
-    currentAtl = res.nextAtl;
-  }
-  return out;
-}
+// ---------------- GA-Run Filters ----------------
 
-function median(values) {
-  if (!values || !values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
-  return sorted[mid];
-}
-
-// ---------------- GA-Filter & Decoupling ----------------
-
-function isGaRunForDecoupling(a, hrMaxGlobal) {
+function isGaRun(a, hrMax) {
   const type = (a.type || "").toLowerCase();
   if (!type.includes("run")) return false;
-
-  const duration = a.moving_time ?? a.elapsed_time ?? a.icu_recording_time ?? 0;
-  if (!duration || duration < 39 * 60) return false;
-
-  const athleteMax = a.athlete_max_hr ?? hrMaxGlobal ?? null;
-  if (!athleteMax || athleteMax <= 0) return false;
-
-  const hrAvg = a.average_heartrate ?? null;
-  const hrMax = a.max_heartrate ?? null;
-  if (!hrAvg || !hrMax) return false;
-
-  const relAvg = hrAvg / athleteMax;
-  const relMax = hrMax / athleteMax;
-
-  if (relAvg < 0.70 || relAvg > 0.82) return false;
-  if (relMax > 0.95) return false;
-
-  const name = (a.name || "").toLowerCase();
-  if (/hit|intervall|interval|schwelle|vo2|max|berg|30s|30\/15|15\/15/i.test(name)) {
-    return false;
-  }
-
-  return true;
+  const dur = a.moving_time ?? 0;
+  if (dur < 40 * 60) return false;
+  const hrAvg = a.average_heartrate;
+  if (!hrAvg || hrAvg < 90) return false;
+  const rel = hrAvg / hrMax;
+  return rel >= 0.7 && rel <= 0.82;
 }
 
-function extractActivityDecoupling(a) {
-  const cand = ["pahr_decoupling", "pa_hr_decoupling", "decoupling"];
-  for (const k of cand) {
-    const v = a[k];
-    if (typeof v === "number" && isFinite(v)) {
-      let x = Math.abs(v);
-      if (x > 1) x = x / 100;
-      return x;
-    }
-  }
-  return null;
+function extractDrift(a) {
+  const v = a.pahr_decoupling ?? a.pa_hr_decoupling ?? null;
+  if (typeof v !== "number" || !isFinite(v)) return null;
+  return Math.abs(v > 1 ? v / 100 : v);
 }
 
-function computePaHrDecoupling(time, hr, velocity) {
-  if (!time || !hr || !velocity) return null;
-  const n = Math.min(time.length, hr.length, velocity.length);
-  if (n < 100) return null;
-
-  const pacePerHr = [];
-  for (let i = 0; i < n; i++) {
-    const v = Math.max(velocity[i] ?? 0, 0.5);
-    const h = Math.max(hr[i] ?? 0, 40);
-    pacePerHr.push(v / h);
-  }
-
-  const mid = Math.floor(pacePerHr.length / 2);
-  if (mid < 10 || pacePerHr.length - mid < 10) return null;
-
-  let sum1 = 0, sum2 = 0;
-  for (let i = 0; i < pacePerHr.length; i++) {
-    if (i < mid) sum1 += pacePerHr[i];
-    else sum2 += pacePerHr[i];
-  }
-
-  const avg1 = sum1 / mid;
-  const avg2 = sum2 / (pacePerHr.length - mid);
-  if (!isFinite(avg1) || avg1 <= 0) return null;
-
-  const drift = (avg2 - avg1) / avg1;
-  return Math.abs(drift);
-}
-
-async function computeDriftFromStream(activityId, authHeader) {
-  try {
-    const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
-    const res = await fetch(url, { headers: { Authorization: authHeader } });
-    if (!res.ok) return null;
-
-    const streams = await res.json();
-    const getStream = (type) => {
-      const s = Array.isArray(streams)
-        ? streams.find(st => st.type === type)
-        : null;
-      return s && Array.isArray(s.data) ? s.data : null;
-    };
-
-    const time = getStream("time");
-    const hr = getStream("heartrate");
-    const vel = getStream("velocity_smooth");
-
-    const drift = computePaHrDecoupling(time, hr, vel);
-    if (drift == null) return null;
-
-    return drift;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function extractRunDecouplingStats(activities, hrMaxGlobal, authHeader) {
+async function computeDecoupling(activities, hrMax, authHeader) {
   const drifts = [];
-  let gaCount = 0;
-  let gaWithDrift = 0;
-
   for (const a of activities) {
-    if (!isGaRunForDecoupling(a, hrMaxGlobal)) continue;
-    gaCount++;
-
-    let drift = extractActivityDecoupling(a);
-    if (drift != null) {
-      gaWithDrift++;
-      drifts.push(drift);
-      continue;
-    }
-
-    drift = await computeDriftFromStream(a.id, authHeader);
-    if (drift != null) {
-      gaWithDrift++;
-      drifts.push(drift);
-    }
+    if (!isGaRun(a, hrMax)) continue;
+    const d = extractDrift(a);
+    if (d != null) drifts.push(d);
   }
-
-  const med = median(drifts);
-  return {
-    medianDrift: med,
-    count: drifts.length,
-    gaCount,
-    gaWithDrift
-  };
+  return { medianDrift: median(drifts), count: drifts.length };
 }
 
-/**
- * Kandidat nur aus Drift:
- * - hoch -> Grundlage
- * - mittel -> Aufbau (VO2max / Motor)
- * - niedrig -> Intensiv (spezifisch / Race Pace)
- */
-function decidePhaseFromRunDecoupling(medianDrift) {
-  if (medianDrift == null) return null;       // kein Zwang-Fallback mehr
-  if (medianDrift > 0.07) return "Grundlage";
-  if (medianDrift > 0.04) return "Aufbau";
-  return "Intensiv";
+// ---------------- Effizienztrend ----------------
+
+function extractEff(a, hrMax) {
+  const v = a.average_speed;
+  const hr = a.average_heartrate;
+  if (!v || !hr) return null;
+  const rel = hr / hrMax;
+  if (rel < 0.7 || rel > 0.82) return null;
+  return v / hr;
 }
 
-// ---------------- GA Effizienz (Speed/HR) + Trend ----------------
-
-function extractGaEfficiency(a, hrMaxGlobal) {
-  const athleteMax = a.athlete_max_hr ?? hrMaxGlobal ?? null;
-  if (!athleteMax || athleteMax <= 0) return null;
-
-  const hrAvg = a.average_heartrate ?? null;
-  const duration = a.moving_time ?? a.elapsed_time ?? a.icu_recording_time ?? 0;
-
-  // Intervals liefert oft average_speed (m/s)
-  const vAvg = a.average_speed ?? a.avg_speed ?? null;
-
-  if (!hrAvg || !vAvg || !duration) return null;
-
-  const relAvg = hrAvg / athleteMax;
-  if (relAvg < 0.70 || relAvg > 0.82) return null;
-
-  return vAvg / hrAvg; // m/s pro bpm
-}
-
-function computeGaEfficiencyTrend(activities, hrMaxGlobal) {
+function effTrend(activities, hrMax) {
   const now = Date.now();
   const d14 = 14 * 24 * 3600 * 1000;
-
-  const effLast14 = [];
-  const effPrev14 = [];
-
+  const effLast = [], effPrev = [];
   for (const a of activities) {
-    if (!isGaRunForDecoupling(a, hrMaxGlobal)) continue;
-
-    const eff = extractGaEfficiency(a, hrMaxGlobal);
-    if (eff == null) continue;
-
-    const ts = a.start_date ?? a.start_time ?? a.start ?? null;
-    const t = ts ? new Date(ts).getTime() : null;
-    if (!t || !isFinite(t)) continue;
-
-    if (now - t <= d14) effLast14.push(eff);
-    else if (now - t <= 2 * d14) effPrev14.push(eff);
+    if (!isGaRun(a, hrMax)) continue;
+    const e = extractEff(a, hrMax);
+    if (!e) continue;
+    const t = new Date(a.start_date ?? a.start_time ?? 0).getTime();
+    if (!t) continue;
+    if (now - t <= d14) effLast.push(e);
+    else if (now - t <= 2 * d14) effPrev.push(e);
   }
-
-  const mLast = median(effLast14);
-  const mPrev = median(effPrev14);
-
-  const trend = (mLast != null && mPrev != null && mPrev > 0)
-    ? (mLast - mPrev) / mPrev
-    : null;
-
-  return {
-    medEffLast14: mLast,
-    medEffPrev14: mPrev,
-    effTrend: trend,
-    nLast14: effLast14.length,
-    nPrev14: effPrev14.length
-  };
+  const mLast = median(effLast), mPrev = median(effPrev);
+  const trend = mLast && mPrev ? (mLast - mPrev) / mPrev : null;
+  return { effTrend: trend, mLast, mPrev, nLast: effLast.length, nPrev: effPrev.length };
 }
 
-// ---------------- Phase Entscheidung (Drift + Effizienztrend Gate) ----------------
+// ---------------- Limiters ----------------
 
-/**
- * Philosophie: unspezifisch -> spezifisch
- * - Grundlage: wenn Drift hoch ODER Upgrade-Gate nicht erfüllt
- * - Aufbau: VO2max / Motor, wenn Drift mittel oder Drift niedrig aber Gate nicht reicht
- * - Intensiv: spezifisch (Race Pace), wenn Drift niedrig UND Gate ok
- */
-function decidePhaseFromQualityOnly({ driftPhase, effTrend }) {
-  const okToUpgrade =
-    (effTrend != null && isFinite(effTrend) && effTrend >= EFF_TREND_UPGRADE_MIN);
-
-  // Wenn wir keinen Drift haben: konservativ -> Grundlage (aber bewusst, nicht „aus Versehen“)
-  if (driftPhase == null) return "Grundlage";
-
-  if (driftPhase === "Grundlage") return "Grundlage";
-
-  if (driftPhase === "Aufbau") {
-    // Upgrade-Gate optional: ohne Trend bleibt man lieber in Grundlage
-    return okToUpgrade ? "Aufbau" : "Grundlage";
-  }
-
-  // driftPhase === "Intensiv"
-  return okToUpgrade ? "Intensiv" : "Aufbau";
+function detectLimiters(dec, eff, well) {
+  const lim = [];
+  const rec = well.recoveryIndex ?? 0.7;
+  if (dec && dec > 0.07)
+    lim.push("🫀 Aerobe Basis limitiert — mehr lange Z2-Läufe (Drift " + (dec*100).toFixed(1) + "%)");
+  if (rec < 0.6)
+    lim.push("🧠 Ermüdungsresistenz limitiert — Deload oder Recovery-Block");
+  if (eff.effTrend != null && eff.effTrend < 0)
+    lim.push("⚙️ Ökonomie limitiert — Technik & Kadenzarbeit (EffTrend " + (eff.effTrend*100).toFixed(1) + "%)");
+  return lim;
 }
 
-// ---------------- Coaching-Notiz: Beschreibung + Was tun ----------------
+// ---------------- Comment Composer ----------------
 
-function phaseActionText(phase) {
-  if (phase === "Grundlage") {
-    return [
-      "Was tun (Grundlage / unspezifisch):",
-      "• Fokus GA: ruhige, längere Läufe (Z2/GA1), Ökonomie & Aerob-System stabilisieren.",
-      "• Intensität niedrig halten (keine harten Intervalle), optional lockere Steigerungen.",
-      "• Ziel: Drift/Decoupling sinkt, Effizienztrend wird positiv."
-    ].join("\n");
-  }
-  if (phase === "Aufbau") {
-    return [
-      "Was tun (Aufbau = VO₂max / Motor groß machen):",
-      "• 1–2 VO₂max-orientierte Einheiten/Woche (kurz-hart), dazwischen viel locker.",
-      "• Rest GA/locker, Gesamtlast kontrolliert steigern (ACWR im Blick).",
-      "• Ziel: Leistungs-„Headroom“ aufbauen für spätere Spezifik."
-    ].join("\n");
-  }
-  // Intensiv
+function buildComment({ phase, ctl, atl, acwr, weeklyTss, decStats, effStats, limiters }) {
+  const driftStr = decStats?.medianDrift != null ? (decStats.medianDrift*100).toFixed(1)+"%" : "k.A.";
+  const effStr = effStats?.effTrend != null ? (effStats.effTrend*100).toFixed(1)+"%" : "k.A.";
+  const limBlock = limiters.length ? "\n\n🏁 Limitierer & Empfehlungen:\n" + limiters.join("\n") : "";
   return [
-    "Was tun (Intensiv = spezifisch / Wettkampfpace):",
-    "• 1–2 längere Intervalle in Wettkampfpace bzw. knapp darum (Race-Pace-Blöcke).",
-    "• GA bleibt Basis, aber Qualität wird spezifischer (Ermüdungstoleranz / TTE).",
-    "• Ziel: Wettkampfleistung unter Ermüdung stabilisieren (PDC / spezifische Ausdauer)."
-  ].join("\n");
-}
-
-function buildCommentText({ phase, driftPhase, weeklyTargetTss, ctl, atl, acwr, decStats, effStats }) {
-  const acwrStr =
-    acwr != null && isFinite(acwr) ? acwr.toFixed(2) : "k.A.";
-
-  const driftStr =
-    decStats.medianDrift != null && isFinite(decStats.medianDrift)
-      ? (decStats.medianDrift * 100).toFixed(1) + "%"
-      : "k.A.";
-
-  const effTrendStr =
-    effStats?.effTrend != null && isFinite(effStats.effTrend)
-      ? (effStats.effTrend * 100).toFixed(1) + "%"
-      : "k.A.";
-
-  const upgradeGateOk =
-    (effStats?.effTrend != null && isFinite(effStats.effTrend) && effStats.effTrend >= EFF_TREND_UPGRADE_MIN);
-
-  const upgradeGateStr = upgradeGateOk ? "ok" : "nicht ok";
-
-  let phaseReason = "";
-  if (phase === "Grundlage") {
-    phaseReason =
-      "Warum: GA-Qualität noch nicht stabil genug (Drift hoch) oder Effizienztrend reicht (noch) nicht für Progression.";
-  } else if (phase === "Aufbau") {
-    phaseReason =
-      "Warum: Grundlage stabil/mittelstabil → jetzt VO₂max-„Motor“ ausbauen; Spezifik nur mit gutem Effizienztrend.";
-  } else if (phase === "Intensiv") {
-    phaseReason =
-      "Warum: Drift niedrig + Effizienztrend positiv → jetzt spezifisch (Race Pace) werden, bei kontrollierter Gesamtlast.";
-  }
-
-  return [
-    `Coaching-Notiz`,
-    ``,
-    `• Phase: ${phase}${phase === "Aufbau" ? " (VO₂max)" : (phase === "Intensiv" ? " (spezifisch)" : "")}`,
-    `• Drift-Kandidat: ${driftPhase ?? "k.A."}`,
-    `• Effizienztrend (14d vs prev14d): ${effTrendStr} (Upgrade-Gate: ${upgradeGateStr}, Schwelle ${(EFF_TREND_UPGRADE_MIN * 100).toFixed(0)}%)`,
-    `• Wochenziel TSS: ~${weeklyTargetTss}`,
-    `• Aktuelle Last: CTL ${ctl.toFixed(1)}, ATL ${atl.toFixed(1)}, ACWR ${acwrStr}`,
-    `• GA-Qualität: medianer PA/HR-Drift ${driftStr} (${decStats.gaWithDrift}/${decStats.gaCount} GA-Läufe mit Drift-Wert)`,
-    ``,
-    phaseReason,
-    ``,
-    phaseActionText(phase)
+    "Coaching-Notiz",
+    "",
+    `• Phase: ${phase}`,
+    `• Wochenziel TSS: ~${weeklyTss}`,
+    `• Aktuelle Last: CTL ${ctl.toFixed(1)}, ATL ${atl.toFixed(1)}, ACWR ${acwr.toFixed(2)}`,
+    `• GA-Qualität: medianer Drift ${driftStr}`,
+    `• Effizienztrend: ${effStr}`,
+    limBlock
   ].join("\n");
 }
 
 // ---------------- MAIN ----------------
 
 async function handle(dryRun = true) {
-  try {
-    const authHeader = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
+  const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
 
-    const today = new Date().toISOString().slice(0, 10);
-    const todayObj = new Date(today + "T00:00:00Z");
+  const today = new Date();
+  const monday = new Date(today);
+  monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+  const mondayStr = monday.toISOString().slice(0, 10);
 
-    // Montag der aktuellen Woche (ISO: Montag = 0)
-    const offset = (todayObj.getUTCDay() + 6) % 7;
-    const monday = new Date(todayObj);
-    monday.setUTCDate(monday.getUTCDate() - offset);
-    const mondayStr = monday.toISOString().slice(0, 10);
+  // Load wellness
+  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
+    headers: { Authorization: auth }
+  });
+  const well = await wRes.json();
+  const ctl = well.ctl ?? 0, atl = well.atl ?? 0, hrMax = well.hrMax ?? 175;
 
-    // Wellness von heute laden (für CTL/ATL etc.)
-    const wRes = await fetch(
-      `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${today}`,
-      { headers: { Authorization: authHeader } }
-    );
-    if (!wRes.ok) {
-      return new Response("Error loading wellness", { status: 500 });
-    }
-    const well = await wRes.json();
-    const ctl = well.ctl ?? 0;
-    const atl = well.atl ?? 0;
-    const hrMaxGlobal = well.hrMax ?? well.max_hr ?? 173;
+  // Load 28d activities
+  const start = new Date(monday); start.setUTCDate(start.getUTCDate() - 28);
+  const aRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
+    { headers: { Authorization: auth } });
+  const activities = await aRes.json();
 
-    // Letzte 28 Tage Aktivitäten
-    const start28 = new Date(monday);
-    start28.setUTCDate(start28.getUTCDate() - 28);
-    const start28Str = start28.toISOString().slice(0, 10);
+  // Compute drift + eff + limiter
+  const decStats = await computeDecoupling(activities, hrMax, auth);
+  const effStats = effTrend(activities, hrMax);
+  const thisWeek = calcNextWeekTarget(ctl, atl);
+  const limiters = detectLimiters(decStats.medianDrift, effStats, well);
 
-    const actRes = await fetch(
-      `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start28Str}&newest=${today}`,
-      { headers: { Authorization: authHeader } }
-    );
-    let activities = [];
-    if (actRes.ok) {
-      const raw = await actRes.json();
-      if (Array.isArray(raw)) activities = raw;
-      else if (raw && typeof raw === "object" && Array.isArray(raw.activities)) {
-        activities = raw.activities;
-      } else if (raw && typeof raw === "object") {
-        activities = Object.values(raw);
-      }
-    }
+  // Phase decision
+  const phase = decStats.medianDrift > 0.07
+    ? "Grundlage"
+    : effStats.effTrend < 0.01 ? "Aufbau" : "Intensiv";
 
-    const decStats = await extractRunDecouplingStats(activities, hrMaxGlobal, authHeader);
-    const driftPhase = decidePhaseFromRunDecoupling(decStats.medianDrift);
+  // Comment text
+  const comment = buildComment({
+    phase,
+    ctl,
+    atl,
+    acwr: thisWeek.acwr,
+    weeklyTss: Math.round(thisWeek.weekTss),
+    decStats,
+    effStats,
+    limiters
+  });
 
-    const effStats = computeGaEfficiencyTrend(activities, hrMaxGlobal);
-
-    const phase = decidePhaseFromQualityOnly({
-      driftPhase,
-      effTrend: effStats.effTrend
-    });
-
-    const thisWeekPlan = calcNextWeekTarget(ctl, atl);
-    const weeklyTargetTss = Math.round(thisWeekPlan.weekTss);
-    const progression = simulateFutureWeeks(ctl, atl, monday, 6, thisWeekPlan);
-
-    const commentText = buildCommentText({
-      phase,
-      driftPhase,
-      weeklyTargetTss,
-      ctl,
-      atl,
-      acwr: thisWeekPlan.acwr,
-      decStats,
-      effStats
-    });
-
-    let futureWriteResults = [];
-
-    // Schreiben in Intervals
-    if (!dryRun) {
-      // 1) Aktueller Wochen-Montag mit Phase + Kommentar
-      const bodyCurrent = {
-        [WEEKLY_TARGET_FIELD]: weeklyTargetTss,
-        [PLAN_FIELD]: phase,               // bleibt kurz: "Grundlage" / "Aufbau" / "Intensiv"
-        [COMMENT_FIELD]: commentText       // hier steht jetzt auch: was tun?
-      };
-
-      const putResCurrent = await fetch(
-        `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`,
-        {
-          method: "PUT",
-          headers: {
-            Authorization: authHeader,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(bodyCurrent)
-        }
-      );
-
-      if (!putResCurrent.ok) {
-        const putText = await putResCurrent.text();
-        return new Response(
-          JSON.stringify(
-            {
-              error: "Error updating current week wellness",
-              status: putResCurrent.status,
-              responseBody: putText,
-              requestBody: bodyCurrent,
-              date: mondayStr
-            },
-            null,
-            2
-          ),
-          { status: 500 }
-        );
-      }
-
-      // 2) Zukünftige Wochen (nur WochenzielTSS)
-      for (const wk of progression) {
-        const bodyFuture = {
-          [WEEKLY_TARGET_FIELD]: wk.weeklyTargetTss
-        };
-
-        const putResFuture = await fetch(
-          `${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${wk.monday}`,
-          {
-            method: "PUT",
-            headers: {
-              Authorization: authHeader,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(bodyFuture)
-          }
-        );
-
-        const textFuture = await putResFuture.text().catch(() => "");
-        futureWriteResults.push({
-          date: wk.monday,
-          status: putResFuture.status,
-          ok: putResFuture.ok,
-          responseBody: textFuture || undefined,
-          requestBody: bodyFuture
-        });
-      }
-    }
-
-    const result = {
-      dryRun,
-      thisWeek: {
-        monday: mondayStr,
-        ctl,
-        atl,
-        atlMax: getAtlMax(ctl),
-        hrMaxGlobal,
-        weekType: thisWeekPlan.weekType,
-        weeklyTargetTss,
-        ctlDelta: thisWeekPlan.ctlDelta,
-        acwr: thisWeekPlan.acwr,
-        phase,
-        driftPhase,
-        comment: commentText,
-        runDecoupling: {
-          ...decStats,
-          medianDriftPercent:
-            decStats.medianDrift != null ? decStats.medianDrift * 100 : null,
-          totalActivities: activities.length
-        },
-        gaEfficiency: effStats
-      },
-      progression,
-      futureWriteResults: dryRun ? null : futureWriteResults
+  if (!dryRun) {
+    const body = {
+      [WEEKLY_TARGET_FIELD]: Math.round(thisWeek.weekTss),
+      [PLAN_FIELD]: phase,
+      [COMMENT_FIELD]: comment
     };
-
-    return new Response(JSON.stringify(result, null, 2), { status: 200 });
-  } catch (err) {
-    return new Response("Error: " + err, { status: 500 });
+    await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
+      method: "PUT",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
   }
+
+  return new Response(JSON.stringify({ phase, ctl, atl, decStats, effStats, limiters, comment }, null, 2), {
+    status: 200
+  });
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const writeParam = url.searchParams.get("write");
-    const shouldWrite =
-      writeParam === "1" ||
-      writeParam === "true" ||
-      writeParam === "yes";
-
-    const dryRun = !shouldWrite;
-    return handle(dryRun);
+  async fetch(req) {
+    const url = new URL(req.url);
+    const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
+    return handle(!write);
   },
-  async scheduled(event, env, ctx) {
-    // nur montags schreiben (UTC!)
-    if (!isUtcMonday()) return;
-    ctx.waitUntil(handle(false));
+  async scheduled(_, __, ctx) {
+    if (isUtcMonday()) ctx.waitUntil(handle(false));
   }
 };
