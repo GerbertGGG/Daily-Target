@@ -365,52 +365,43 @@ async function handle(dryRun = true) {
     comment
   };
 
+  // Kommentar zurückgeben
   if (DEBUG) console.log(JSON.stringify(result, null, 2));
+
+  // ✅ Rückgabe bleibt innerhalb der Funktion
   return new Response(JSON.stringify(result, null, 2), { status: 200 });
 }
 
-// ============================================================
-// Export (Fetch + Scheduler)
-// ============================================================
-export default {
-  async fetch(req) {
-    const url = new URL(req.url);
-    const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
-    return handle(!write);
-  },
-  async scheduled(_, __, ctx) {
-    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
-  }
-};
-  if (DEBUG) console.log(JSON.stringify(result, null, 2));
-  return new Response(JSON.stringify(result, null, 2), { status: 200 });
-
-
-// ============================================================
-// Export (Fetch + Scheduler)
-// ============================================================
 // ============================================================
 // ✅ Export (Fetch + Scheduler) – nur EIN Default-Export erlaubt!
 // ============================================================
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const writeParam = url.searchParams.get("write");
-    const shouldWrite =
-      writeParam === "1" ||
-      writeParam === "true" ||
-      writeParam === "yes";
+    try {
+      const url = new URL(request.url);
+      const writeParam = url.searchParams.get("write");
+      const shouldWrite =
+        writeParam === "1" ||
+        writeParam === "true" ||
+        writeParam === "yes";
 
-    const dryRun = !shouldWrite;
-    const response = await handle(dryRun);
-    return response;
+      const dryRun = !shouldWrite;
+      const response = await handle(dryRun);
+      return response;
+    } catch (err) {
+      return new Response("Error: " + err.message, { status: 500 });
+    }
   },
 
   async scheduled(event, env, ctx) {
     // Nur montags ausführen (UTC)
-    const now = new Date();
-    const isMonday = now.getUTCDay() === 1;
-    if (!isMonday) return;
-    ctx.waitUntil(handle(false));
+    try {
+      const now = new Date();
+      const isMonday = now.getUTCDay() === 1;
+      if (!isMonday) return;
+      ctx.waitUntil(handle(false));
+    } catch (err) {
+      console.error("Scheduled error:", err);
+    }
   }
 };
