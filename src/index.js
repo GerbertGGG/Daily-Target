@@ -123,18 +123,17 @@ function computeEfficiencyTrend(activities, hrMax) {
 __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
 // =========================
-// 📅 Neue Funktion: Kalendereinträge (zukünftige 
-// 🏁 Zukünftige Rennen (Kategorie: A-Rennen, B-Rennen, C-Rennen) aus dem Kalender 
-
-// =========================
-// 🏁 Zukünftige A-Rennen aus dem Kalender abrufen
+// 🏁 Zukünftige Rennen (A-Rennen) aus dem Kalender abrufen
 // =========================
 async function fetchUpcomingRaces(authHeader) {
   const start = new Date();
   const end = new Date();
-  end.setUTCDate(start.getUTCDate() + 180); // 6 Monate
+  end.setUTCDate(start.getUTCDate() + 180); // 6 Monate nach vorn
 
-  const url = `${BASE_URL}/athlete/${ATHLETE_ID}/events?oldest=${start.toISOString().slice(0,10)}&newest=${end.toISOString().slice(0,10)}`;
+  const oldest = start.toISOString().slice(0, 10);
+  const newest = end.toISOString().slice(0, 10);
+
+  const url = `${BASE_URL}/athlete/${ATHLETE_ID}/events?oldest=${oldest}&newest=${newest}`;
   const res = await fetch(url, { headers: { Authorization: authHeader } });
 
   if (!res.ok) {
@@ -144,67 +143,32 @@ async function fetchUpcomingRaces(authHeader) {
 
   const payload = await res.json();
 
-  // 🧠 API kann Array ODER Objekt mit events liefern
+  // API kann Array ODER Objekt mit events liefern
   const events = Array.isArray(payload)
     ? payload
-    : Array.isArray(payload.events)
+    : Array.isArray(payload?.events)
       ? payload.events
       : [];
 
-  if (DEBUG) {
-    console.log("🏁 Events gesamt:", events.length);
-    console.log("🏁 Beispiel-Event:", events[0]);
-  }
-
-  const races = events.filter(e => {
-    const cat = String(
-      e.category ??
-      e.event_category ??
-      e.type ??
-      ""
-    ).toLowerCase().trim();
-
-    // 🎯 trifft "A-Rennen", "A Rennen", "A-Race", "A"
+  // Nur A-Rennen: Kategorie = "A-Rennen" (oder Varianten wie "A Rennen", "A-Race", "A")
+  const races = events.filter((e) => {
+    const cat = String(e.category ?? e.event_category ?? e.type ?? "").toLowerCase().trim();
     return /^a(\s|-)?(rennen|race)?$/.test(cat);
   });
 
   if (DEBUG) {
-    if (races.length > 0) {
-      console.log(`🏁 Gefundene A-Rennen (${races.length}):`);
-      races.forEach(r =>
-        console.log(
-          `- ${r.name} (${r.category || r.event_category || r.type}) am ${r.start_date_local || r.start_date}`
-        )
+    if (races.length)
+      console.log(
+        `🏁 Gefundene A-Rennen (${races.length}):`,
+        races.map((r) => `${r.name} – ${(r.start_date_local || r.start_date || "").slice(0, 10)}`)
       );
-    } else {
-      console.log("⚪ Keine A-Rennen gefunden.");
-    }
+    else
+      console.log("⚪ Keine A-Rennen im Kalender gefunden.");
   }
 
   return races;
 }
-  const entries = await res.json();
-  const races = entries.filter(e => {
-    const cat = (e.category || "").toLowerCase();
-    const name = (e.name || "").toLowerCase();
-    return (
-      cat.includes("rennen") ||
-      name.includes("rennen") ||
-      name.includes("lauf") ||
-      name.includes("marathon") ||
-      name.includes("triathlon") ||
-      name.includes("ironman")
-    );
-  });
-
-  if (DEBUG) {
-    if (races.length)
-      console.log(`🏁 Gefundene geplante Rennen (${races.length}):`, races.map(r => `${r.name} – ${r.start_date_local || r.start_date}`));
-    else
-      console.log("⚪ Keine geplanten Rennen im Kalender gefunden.");
-  }
-
-  return races;
+__name(fetchUpcomingRaces, "fetchUpcomingRaces");
 
 // =========================
 // 📈 Trainingslogik
@@ -213,6 +177,9 @@ var CTL_DELTA_TARGET = 0.8;
 var ACWR_SOFT_MAX = 1.3;
 var ACWR_HARD_MAX = 1.5;
 var DELOAD_FACTOR = 0.9;
+
+// Effizienz-Upgrade Gate (nicht strenger): +1% in 14 Tagen
+var EFF_TREND_UPGRADE_MIN = 0.01;
 
 function getAtlMax(ctl) {
   if (ctl < 30) return 30;
@@ -286,7 +253,7 @@ function buildStatusAmpel({ dec, eff, rec, sport }) {
   markers.push({
     name: "Effizienz (Speed/HR)",
     value: `${(eff * 100).toFixed(1)} %`,
-    color: eff > 0.01 ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
+    color: eff > EFF_TREND_UPGRADE_MIN ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
   });
   markers.push({
     name: "Ermüdungsresistenz",
@@ -322,7 +289,10 @@ async function handle(dryRun = true) {
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - (today.getUTCDay() + 6) % 7);
   const mondayStr = monday.toISOString().slice(0, 10);
-  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
+
+  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
+    headers: { Authorization: auth }
+  });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
   const ctl = well.ctl ?? 60;
@@ -332,24 +302,32 @@ async function handle(dryRun = true) {
   // 📊 Aktivitäten der letzten 28 Tage
   const start = new Date();
   start.setUTCDate(start.getUTCDate() - 28);
-  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
+
+  const actRes = await fetch(
+    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
+    { headers: { Authorization: auth } }
+  );
   const acts = await actRes.json();
 
   const runActs = acts.filter((a) => a.type?.includes("Run"));
   const rideActs = acts.filter((a) => a.type?.includes("Ride"));
+
   const runDrift = await extractDriftStats(runActs, hrMax, auth);
   const rideDrift = await extractDriftStats(rideActs, hrMax, auth);
+
   const runEff = computeEfficiencyTrend(runActs, hrMax);
   const rideEff = computeEfficiencyTrend(rideActs, hrMax);
+
   const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
   const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
+
   const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
-  // 🏁 Zukünftige Rennen abrufen
+  // 🏁 Zukünftige A-Rennen abrufen
   const raceEvents = await fetchUpcomingRaces(auth);
 
-  let raceSummary = "⚪ Keine geplanten Rennen im nächsten halben Jahr.";
+  let raceSummary = "⚪ Keine geplanten A-Rennen im nächsten halben Jahr.";
   if (raceEvents.length > 0) {
     raceSummary = raceEvents.map((r, i) => {
       const date = (r.start_date_local || r.start_date || "").slice(0, 10);
@@ -369,11 +347,12 @@ async function handle(dryRun = true) {
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
     `**Vorschau:** ${progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`,
     "",
-    "🏁 **Geplante Rennen (nächste 6 Monate):**",
+    "🏁 **Geplante A-Rennen (nächste 6 Monate):**",
     raceSummary
   ].join("\n");
 
   if (DEBUG) console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression, raceEvents });
+
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
       method: "PUT",
