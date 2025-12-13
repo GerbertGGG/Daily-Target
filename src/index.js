@@ -1,16 +1,6 @@
 /**
  * ============================================================
- * 🚀 IntervalsLimiterCoach_Final_v9.js
- * ============================================================
- * Features:
- * ✅ Alte CTL/ATL Simulation (Friel/TrainingPeaks)
- * ✅ Drift: Lauf = PA:HR, Rad = PW:HR (mit Streams)
- * ✅ GA-Filter (Z1/Z2 only, Dauer >40min, keine Intervalle)
- * ✅ Effizienztrend: Lauf = Speed/HR, Rad Outdoor = Power/HR, Indoor = nur Power
- * ✅ Getrennte Ampeltabellen für Run & Ride
- * ✅ Phase & Wochen-TSS-Empfehlung
- * ✅ Montagsschutz + Logging
- * ✅ Neu: Event-Awareness → Empfehlung abhängig von Eventtyp (Run/Ride/both)
+ * IntervalsLimiterCoach v10 – Event-Aware Final
  * ============================================================
  */
 
@@ -34,15 +24,13 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 GA-Filter (optimiert für Run & Ride, mit Intervall-Filter)
+// 🫀 GA-Filter (optimiert für Run & Ride)
 // ============================================================
 function isGaSession(a, hrMax) {
   const type = (a.type || "").toLowerCase();
   const name = (a.name || "").toLowerCase();
 
-  // -----------------------------
-  // 🏃‍♂️ Laufen
-  // -----------------------------
+  // Laufen
   if (type.includes("run")) {
     const dur = a.moving_time ?? 0;
     const hr = a.average_heartrate ?? null;
@@ -53,30 +41,18 @@ function isGaSession(a, hrMax) {
     return true;
   }
 
-  // -----------------------------
-  // 🚴‍♂️ Radfahren (neuer GA-Filter)
-  // -----------------------------
+  // Radfahren
   if (type.includes("ride")) {
     const dur = a.moving_time ?? 0;
     const hr = a.average_heartrate ?? null;
     if (dur < 40 * 60 || !hr || !hrMax) return false;
     const rel = hr / hrMax;
     if (rel < 0.68 || rel > 0.80) return false;
-
-    // Ausschluss: Intervalle, Tests, HIT
     if (/intervall|interval|vo2|max|schwelle|sweet|test|ramp|ftp|berg|30s|15\/15/i.test(name)) return false;
-
-    // Variabilitätsindex (gleichmäßige GA)
     const np = a.normalized_power ?? null;
     const avg = a.avg_power ?? a.average_watts ?? null;
-    if (np && avg) {
-      const vi = np / avg;
-      if (vi > 1.15) return false;
-    }
-
-    // keine Smartrolle (VirtualRide) für Drift
+    if (np && avg && np / avg > 1.15) return false;
     if (type.includes("virtual")) return false;
-
     return true;
   }
 
@@ -84,7 +60,7 @@ function isGaSession(a, hrMax) {
 }
 
 // ============================================================
-// 🧮 Driftberechnung
+// 🧮 Driftberechnung (Run & Ride, mit Retry)
 // ============================================================
 async function computePaHrDecoupling(time, hr, velocity) {
   if (!time || !hr || !velocity) return null;
@@ -94,9 +70,7 @@ async function computePaHrDecoupling(time, hr, velocity) {
   const rel1 = velocity.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
   const rel2 = velocity.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
   if (!rel1 || !isFinite(rel1)) return null;
-  let drift = Math.abs((rel2 - rel1) / rel1);
-  if (drift > 0.15) drift = 0.15; // Cap 15 %
-  return drift;
+  return Math.min(Math.abs((rel2 - rel1) / rel1), 0.15);
 }
 
 async function computePowerHrDecoupling(time, hr, power) {
@@ -107,17 +81,23 @@ async function computePowerHrDecoupling(time, hr, power) {
   const rel1 = power.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
   const rel2 = power.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
   if (!rel1 || !isFinite(rel1)) return null;
-  let drift = Math.abs((rel2 - rel1) / rel1);
-  if (drift > 0.15) drift = 0.15;
-  return drift;
+  return Math.min(Math.abs((rel2 - rel1) / rel1), 0.15);
 }
 
 async function computeDriftFromStream(a, authHeader) {
   try {
     const url = `${BASE_URL}/activity/${a.id}/streams.json?types=time,heartrate,velocity_smooth,watts_smooth,watts`;
-    const res = await fetch(url, { headers: { Authorization: authHeader } });
-    if (!res.ok) return null;
-    const streams = await res.json();
+    let res = await fetch(url, { headers: { Authorization: authHeader } });
+    let streams;
+    if (!res.ok) {
+      await new Promise(r => setTimeout(r, 300));
+      const retry = await fetch(url, { headers: { Authorization: authHeader } });
+      if (!retry.ok) return null;
+      streams = await retry.json();
+    } else {
+      streams = await res.json();
+    }
+
     const get = (t) => streams.find(s => s.type === t)?.data ?? null;
     const time = get("time");
     const hr = get("heartrate");
@@ -150,6 +130,7 @@ async function extractDriftStats(activities, hrMax, authHeader) {
   const drifts = [];
   for (const a of activities) {
     if (!isGaSession(a, hrMax)) continue;
+    if (!a.average_heartrate || a.average_heartrate < 60) continue;
     let drift = extractActivityDecoupling(a);
     if (drift == null) drift = await computeDriftFromStream(a, authHeader);
     if (drift != null) drifts.push(drift);
@@ -159,28 +140,23 @@ async function extractDriftStats(activities, hrMax, authHeader) {
 }
 
 // ============================================================
-// ⚙️ Effizienztrend (Run: Speed/HR, Ride: Power/HR bevorzugt)
+// ⚙️ Effizienztrend
 // ============================================================
 function computeEfficiency(a, hrMax) {
   const hr = a.average_heartrate ?? null;
   if (!hr || !hrMax) return null;
   const rel = hr / hrMax;
   if (rel < 0.7 || rel > 0.82) return null;
-
   const type = a.type?.toLowerCase() ?? "";
-  const isRide = type.includes("ride");
-  const isVirtual = type.includes("virtual");
-
-  if (isRide) {
+  if (type.includes("ride")) {
     const power = a.weighted_average_watts ?? a.avg_power ?? null;
     if (power) return power / hr;
-    if (!isVirtual) {
+    if (!type.includes("virtual")) {
       const v = a.average_speed ?? a.avg_speed ?? null;
       if (v) return v / hr;
     }
     return null;
   }
-
   const v = a.average_speed ?? a.avg_speed ?? null;
   return v ? v / hr : null;
 }
@@ -199,8 +175,7 @@ function computeEfficiencyTrend(activities, hrMax) {
   }
   const mLast = median(effLast);
   const mPrev = median(effPrev);
-  const trend = mLast && mPrev ? (mLast - mPrev) / mPrev : 0;
-  return trend;
+  return (mLast && mPrev) ? (mLast - mPrev) / mPrev : 0;
 }
 
 // ============================================================
@@ -218,22 +193,6 @@ function getAtlMax(ctl) {
   return 85;
 }
 
-function shouldDeload(ctl, atl) {
-  const acwr = ctl > 0 ? atl / ctl : 1;
-  if (acwr >= ACWR_HARD_MAX) return true;
-  if (atl > getAtlMax(ctl)) return true;
-  return false;
-}
-
-function maxSafeCtlDelta(ctl) {
-  if (ctl <= 0) return CTL_DELTA_TARGET;
-  const numerator = (ACWR_SOFT_MAX - 1) * ctl;
-  const denominator = 6 - ACWR_SOFT_MAX;
-  const d = numerator / denominator;
-  if (!isFinite(d) || d <= 0) return 0;
-  return d;
-}
-
 function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   const tssMean = ctl + 6 * ctlDelta;
   const weekTss = tssMean * 7;
@@ -241,7 +200,7 @@ function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
   const nextAtl = tssMean;
   const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
   const weekType = ctlDelta > 0 ? "BUILD" : ctlDelta < 0 ? "DELOAD" : "MAINTAIN";
-  return { weekType, ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
+  return { weekType, ctlDelta, weekTss, nextCtl, nextAtl, acwr };
 }
 
 function simulateFutureWeeks(ctl, atl, weeks = 6) {
@@ -264,7 +223,7 @@ function simulateFutureWeeks(ctl, atl, weeks = 6) {
 }
 
 // ============================================================
-// 🚦 Ampel + Phase
+// 🚦 Ampel & Phase
 // ============================================================
 function statusColor(c) {
   return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
@@ -305,21 +264,20 @@ function buildPhaseRecommendation(runMarkers, rideMarkers) {
 }
 
 // ============================================================
-// 🧮 MAIN (Event-Aware + Montagsschutz)
+// MAIN
 // ============================================================
 async function handle(dryRun = true) {
   const today = new Date();
   const isMonday = today.getUTCDay() === 1;
-  if (!isMonday && !dryRun) {
-    return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt", dryRun: true }, null, 2), { status: 200 });
-  }
+  if (!isMonday && !dryRun)
+    return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt" }, null, 2));
 
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
   const mondayStr = monday.toISOString().slice(0, 10);
 
-  // --- Wellness ---
+  // Wellness
   const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
@@ -327,21 +285,23 @@ async function handle(dryRun = true) {
   const atl = well.atl ?? 65;
   const rec = well.recoveryIndex ?? 0.65;
 
-  // --- Events ---
+  // Events
   const evRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/events`, { headers: { Authorization: auth } });
   const events = evRes.ok ? await evRes.json() : [];
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const upcomingEvent = events.find(e => e.start_date_local?.slice(0,10) >= todayStr && !e.completed);
-  const eventType = upcomingEvent?.type ?? null;
+  const futureEvents = events
+    .filter(e => e.start_date_local && !e.completed)
+    .map(e => ({ ...e, start: new Date(e.start_date_local) }))
+    .filter(e => e.start >= today);
+  const upcomingEvent = futureEvents.sort((a,b) => a.start - b.start)[0];
 
   let activeSport = "both";
-  if (eventType?.toLowerCase().includes("run")) activeSport = "run";
-  else if (eventType?.toLowerCase().includes("ride")) activeSport = "ride";
+  if (upcomingEvent?.type?.toLowerCase().includes("run")) activeSport = "run";
+  else if (upcomingEvent?.type?.toLowerCase().includes("ride")) activeSport = "ride";
 
-  // --- Activities ---
+  // Activities
   const start = new Date(monday);
   start.setUTCDate(start.getUTCDate() - 28);
-  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${today.toISOString().slice(0, 10)}`, { headers: { Authorization: auth } });
+  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
   const rideActs = acts.filter(a => a.type?.includes("Ride"));
@@ -361,21 +321,17 @@ async function handle(dryRun = true) {
 
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
-  // --- Kommentar ---
+  // Kommentar
   const eventNote = upcomingEvent
     ? `🎯 Event erkannt: ${upcomingEvent.name} (${upcomingEvent.type})`
     : `ℹ️ Kein aktives Event – Werte kombiniert (Lauf + Rad).`;
 
-  const commentBlocks = [eventNote,
-    ];
+  const commentBlocks = [eventNote];
 
-  // --- Sport-abhängige Tabellen hinzufügen ---
-  if (activeSport === "run" || activeSport === "both") {
+  if (activeSport === "run" || activeSport === "both")
     commentBlocks.push("", "🏃‍♂️ **Laufen**", runTable.table);
-  }
-  if (activeSport === "ride" || activeSport === "both") {
+  if (activeSport === "ride" || activeSport === "both")
     commentBlocks.push("", "🚴‍♂️ **Rad**", rideTable.table);
-  }
 
   commentBlocks.push(
     "",
@@ -386,7 +342,6 @@ async function handle(dryRun = true) {
 
   const comment = commentBlocks.join("\n");
 
-  // --- Schreiben in Intervals ---
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
       method: "PUT",
@@ -396,9 +351,7 @@ async function handle(dryRun = true) {
   }
 
   const result = {
-    event: upcomingEvent
-      ? { name: upcomingEvent.name, type: upcomingEvent.type, date: upcomingEvent.start_date_local }
-      : null,
+    event: upcomingEvent ? { name: upcomingEvent.name, type: upcomingEvent.type, date: upcomingEvent.start_date_local } : null,
     activeSport,
     run: runTable,
     ride: rideTable,
@@ -412,15 +365,8 @@ async function handle(dryRun = true) {
 }
 
 // ============================================================
-// 🧩 Export + Scheduler
+// Export
 // ============================================================
 export default {
   async fetch(req) {
     const url = new URL(req.url);
-    const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
-    return handle(!write);
-  },
-  async scheduled(_, __, ctx) {
-    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
-  }
-};
