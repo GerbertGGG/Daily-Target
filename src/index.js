@@ -389,6 +389,9 @@ export default {
 // ============================================================
 // Export (Fetch + Scheduler)
 // ============================================================
+// ============================================================
+// ✅ Export (Fetch + Scheduler) – nur EIN Default-Export erlaubt!
+// ============================================================
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -399,7 +402,8 @@ export default {
       writeParam === "yes";
 
     const dryRun = !shouldWrite;
-    return handle(dryRun);
+    const response = await handle(dryRun);
+    return response;
   },
 
   async scheduled(event, env, ctx) {
