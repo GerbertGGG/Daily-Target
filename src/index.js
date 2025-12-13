@@ -1,12 +1,13 @@
 /**
  * ============================================================
- * 🚦 IntervalsLimiterCoach_Finale.js
+ * 🚦 IntervalsLimiterCoach_Final.js
  * ============================================================
  * Features:
- *  ✅ Status-Ampel für heutige Fitness
+ *  ✅ Echte Driftberechnung (PA:HR aus Streams)
+ *  ✅ Status-Ampel (heutige Fitness)
  *  ✅ Einfache Phasenempfehlung (Grundlage / Aufbau)
- *  ✅ Wochen-TSS-Ziel dynamisch angepasst
- *  ✅ Sanity-Check & Debug-Log
+ *  ✅ Dynamisches Wochen-TSS-Ziel
+ *  ✅ Sanity-Check & Debug-Modus
  * ============================================================
  */
 
@@ -30,8 +31,39 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 Drift & Effizienz
+// 🫀 Drift & Effizienz (mit Stream-Fallback)
 // ============================================================
+
+async function computePaHrDecoupling(time, hr, velocity) {
+  if (!time || !hr || !velocity) return null;
+  const n = Math.min(time.length, hr.length, velocity.length);
+  if (n < 200) return null;
+  const mid = Math.floor(n / 2);
+  const rel1 = velocity.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
+  const rel2 = velocity.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
+  if (!rel1 || !isFinite(rel1)) return null;
+  const drift = Math.abs((rel2 - rel1) / rel1);
+  if (DEBUG) console.log("Drift berechnet:", drift.toFixed(4));
+  return drift;
+}
+
+async function computeDriftFromStream(activityId, authHeader) {
+  try {
+    const url = `${BASE_URL}/activity/${activityId}/streams.json?types=time,heartrate,velocity_smooth`;
+    const res = await fetch(url, { headers: { Authorization: authHeader } });
+    if (!res.ok) return null;
+    const streams = await res.json();
+    const get = (t) => streams.find(s => s.type === t)?.data ?? null;
+    const time = get("time");
+    const hr = get("heartrate");
+    const vel = get("velocity_smooth");
+    return computePaHrDecoupling(time, hr, vel);
+  } catch (e) {
+    if (DEBUG) console.log("Drift Stream Error", e);
+    return null;
+  }
+}
+
 function extractActivityDecoupling(a) {
   const keys = ["pahr_decoupling", "pwhr_decoupling", "decoupling"];
   for (const k of keys) {
@@ -55,6 +87,22 @@ function isGaRun(a, hrMax) {
   return rel >= 0.7 && rel <= 0.82;
 }
 
+async function extractDriftStats(activities, hrMax, authHeader) {
+  const drifts = [];
+  for (const a of activities) {
+    if (!isGaRun(a, hrMax)) continue;
+    let drift = extractActivityDecoupling(a);
+    if (drift == null) drift = await computeDriftFromStream(a.id, authHeader);
+    if (drift != null) drifts.push(drift);
+  }
+  const med = median(drifts);
+  if (DEBUG) console.log("Drift Median:", med);
+  return { medianDrift: med, count: drifts.length };
+}
+
+// ============================================================
+// ⚙️ Effizienz
+// ============================================================
 function computeEfficiency(a, hrMax) {
   const hr = a.average_heartrate ?? null;
   if (!hr || !hrMax) return null;
@@ -62,6 +110,26 @@ function computeEfficiency(a, hrMax) {
   if (rel < 0.7 || rel > 0.82) return null;
   const v = a.average_speed ?? null;
   return v ? v / hr : null;
+}
+
+function computeEfficiencyTrend(activities, hrMax) {
+  const now = Date.now();
+  const d14 = 14 * 24 * 3600 * 1000;
+  const effLast = [];
+  const effPrev = [];
+  for (const a of activities) {
+    if (!isGaRun(a, hrMax)) continue;
+    const eff = computeEfficiency(a, hrMax);
+    if (!eff) continue;
+    const t = new Date(a.start_date ?? 0).getTime();
+    if (now - t <= d14) effLast.push(eff);
+    else if (now - t <= 2 * d14) effPrev.push(eff);
+  }
+  const mLast = median(effLast);
+  const mPrev = median(effPrev);
+  const trend = mLast && mPrev ? (mLast - mPrev) / mPrev : 0;
+  if (DEBUG) console.log("EffTrend:", trend.toFixed(4));
+  return trend;
 }
 
 // ============================================================
@@ -78,11 +146,10 @@ function buildStatusAmpel({ dec, eff, ftp, rec }) {
     value: dec != null ? `${(dec * 100).toFixed(1)} %` : "k.A.",
     color: dec == null ? "white" : dec < 0.05 ? "green" : dec < 0.07 ? "yellow" : "red"
   });
-  const e = eff ?? 0;
   markers.push({
     name: "Effizienz (Speed/HR)",
-    value: `${(e * 100).toFixed(1)} %`,
-    color: e > 0.01 ? "green" : Math.abs(e) <= 0.01 ? "yellow" : "red"
+    value: `${(eff * 100).toFixed(1)} %`,
+    color: eff > 0.01 ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
   });
   markers.push({
     name: "Schwelle (FTP/eFTP)",
@@ -112,7 +179,7 @@ function buildPhaseRecommendation(markers) {
 }
 
 // ============================================================
-// 📈 Wochen-TSS-Anpassung
+// 📈 Wochen-TSS + Sanity
 // ============================================================
 function adjustWeeklyTSS(baseTSS, phase) {
   if (phase.includes("Grundlage")) return Math.round(baseTSS * 0.9);
@@ -120,9 +187,6 @@ function adjustWeeklyTSS(baseTSS, phase) {
   return Math.round(baseTSS);
 }
 
-// ============================================================
-// 🧠 Sanity-Check
-// ============================================================
 function sanityCheck(status) {
   const reds = status.markers.filter(m => m.color === "red");
   if (reds.length && reds.every(m => m.value === "k.A.")) {
@@ -147,7 +211,7 @@ async function handle(dryRun = true) {
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
   const ctl = well.ctl ?? 60;
-  const atl = well.atl ?? 65;
+  const rec = well.recoveryIndex ?? 0.65;
 
   const start = new Date(monday);
   start.setUTCDate(start.getUTCDate() - 28);
@@ -160,33 +224,19 @@ async function handle(dryRun = true) {
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
 
-  // Analyse
-  const drifts = runActs.map(a => extractActivityDecoupling(a)).filter(x => x != null);
-  const dec = median(drifts);
-  const effVals = runActs.map(a => computeEfficiency(a, hrMax)).filter(x => x != null);
-  const effTrend = (() => {
-    const now = Date.now();
-    const d14 = 14 * 24 * 3600 * 1000;
-    const last = effVals.filter(a => now - new Date(a.start_date ?? 0).getTime() <= d14);
-    const prev = effVals.filter(a => now - new Date(a.start_date ?? 0).getTime() > d14);
-    const mLast = median(last), mPrev = median(prev);
-    return mLast && mPrev ? (mLast - mPrev) / mPrev : 0;
-  })();
+  const { medianDrift: dec } = await extractDriftStats(runActs, hrMax, auth);
+  const effTrend = computeEfficiencyTrend(runActs, hrMax);
   const ftp = {
     old: well.ftp_prev ?? well.ftp,
     new: well.ftp,
     delta: (well.ftp ?? 0) - (well.ftp_prev ?? 0)
   };
-  const rec = well.recoveryIndex ?? 0.65;
 
-  // Status + Phase
   const status = buildStatusAmpel({ dec, eff: effTrend, ftp, rec });
   sanityCheck(status);
   const phase = buildPhaseRecommendation(status.markers);
-  const weekTSSBase = ctl * 7; // grobe Schätzung
-  const weeklyTargetTSS = adjustWeeklyTSS(weekTSSBase, phase);
+  const weeklyTargetTSS = adjustWeeklyTSS(ctl * 7, phase);
 
-  // Kommentar
   const comment = [
     "🏁 **Status-Ampel (Heute)**",
     "",
