@@ -52,7 +52,7 @@ async function computeDriftFromStream(activityId, authHeader) {
     const res = await fetch(url, { headers: { Authorization: authHeader } });
     if (!res.ok) return null;
     const streams = await res.json();
-    const get = /* @__PURE__ */ __name((t) => streams.find((s) => s.type === t)?.data ?? null, "get");
+    const get = (t) => streams.find((s) => s.type === t)?.data ?? null;
     return computePaHrDecoupling(get("time"), get("heartrate"), get("velocity_smooth"));
   } catch (e) {
     if (DEBUG) console.log("Drift Stream Error", e);
@@ -119,7 +119,7 @@ function computeEfficiencyTrend(activities, hrMax) {
 }
 __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
-// 🏁 Rennen erkennen und loggen
+// 🏁 Rennen erkennen (inkl. geplante)
 function logRaceEvents(activities) {
   const raceEvents = activities.filter(a => {
     const name = (a.name || "").toLowerCase();
@@ -136,7 +136,7 @@ function logRaceEvents(activities) {
   });
 
   if (DEBUG && raceEvents.length > 0) {
-    console.log("🏁 Gefundene Rennen:");
+    console.log("🏁 Geplante oder vergangene Rennen gefunden:");
     raceEvents.forEach((r, i) => {
       console.log(
         `#${i + 1}: ${r.name} | Typ: ${r.type} | Datum: ${r.start_date_local || r.start_date
@@ -144,7 +144,7 @@ function logRaceEvents(activities) {
       );
     });
   } else if (DEBUG) {
-    console.log("⚪ Keine Rennen im angegebenen Zeitraum gefunden.");
+    console.log("⚪ Keine Rennen im Zeitraum gefunden.");
   }
 
   return raceEvents;
@@ -291,10 +291,16 @@ async function handle(dryRun = true) {
   const ctl = well.ctl ?? 60;
   const atl = well.atl ?? 65;
   const rec = well.recoveryIndex ?? 0.65;
-  const start = new Date(monday);
-  start.setUTCDate(start.getUTCDate() - 28);
 
-  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${today.toISOString().slice(0, 10)}`, { headers: { Authorization: auth } });
+  // 🔮 Zeitraum: von heute bis +180 Tage
+  const start = new Date();
+  const end = new Date();
+  end.setUTCDate(start.getUTCDate() + 180);
+
+  const actRes = await fetch(
+    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${end.toISOString().slice(0, 10)}`,
+    { headers: { Authorization: auth } }
+  );
   const acts = await actRes.json();
 
   // 🏁 Rennen erkennen
@@ -312,7 +318,7 @@ async function handle(dryRun = true) {
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
   // 📝 Rennen in Textform in Kommentar aufnehmen
-  let raceSummary = "⚪ Keine Rennen im angegebenen Zeitraum.";
+  let raceSummary = "⚪ Keine geplanten Rennen im nächsten halben Jahr.";
   if (raceEvents.length > 0) {
     raceSummary = raceEvents
       .map((r, i) => {
@@ -335,7 +341,7 @@ async function handle(dryRun = true) {
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
     `**Vorschau:** ${progression.map((p) => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`,
     "",
-    "🏁 **Gefundene Rennen:**",
+    "🏁 **Geplante Rennen (nächste 6 Monate):**",
     raceSummary
   ].join("\n");
 
