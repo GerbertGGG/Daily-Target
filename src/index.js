@@ -1,14 +1,16 @@
 /**
  * ============================================================
- * 🚦 IntervalsLimiterCoach_FullCTL.js
+ * 🚦 IntervalsLimiterCoach_Production_Final.js
  * ============================================================
  * Features:
- *  ✅ PA:HR Drift aus Streams (Aerobe Basis)
- *  ✅ Effizienztrend (14d vs. 14d)
- *  ✅ Status-Ampel
+ *  ✅ Echte Driftberechnung (PA:HR aus Streams)
+ *  ✅ Effizienztrend (14d vs 14d)
+ *  ✅ Status-Ampel (aktuelle Fitness)
  *  ✅ Phasenempfehlung (Grundlage / Aufbau / Deload)
- *  ✅ Volle CTL/ATL-basierte TSS-Simulation (6 Wochen)
- *  ✅ Sanity-Check & Debug
+ *  ✅ Volle CTL/ATL/TSS Simulation (alte Logik)
+ *  ✅ Kommentartext direkt in Intervals
+ *  ✅ Debug + Sanity Check
+ *  ✅ Montagsschutz (Safety Gate)
  * ============================================================
  */
 
@@ -34,7 +36,6 @@ function median(values) {
 // ============================================================
 // 🫀 Drift mit Stream-Fallback
 // ============================================================
-
 async function computePaHrDecoupling(time, hr, velocity) {
   if (!time || !hr || !velocity) return null;
   const n = Math.min(time.length, hr.length, velocity.length);
@@ -131,9 +132,8 @@ function computeEfficiencyTrend(activities, hrMax) {
 }
 
 // ============================================================
-// 🧮 Echte CTL/ATL/TSS Simulation (alte Logik)
+// 🧮 Volle CTL/ATL/TSS Simulation (alte Logik)
 // ============================================================
-
 const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
 const ACWR_HARD_MAX = 1.5;
@@ -213,7 +213,6 @@ function simulateFutureWeeks(ctl, atl, weeks = 6) {
 // ============================================================
 // 🚦 Ampel + Phase
 // ============================================================
-
 function statusColor(c) {
   return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
 }
@@ -258,12 +257,27 @@ function buildPhaseRecommendation(markers) {
 }
 
 // ============================================================
-// 🧮 MAIN
+// 🧮 MAIN (mit Montagsschutz)
 // ============================================================
-
 async function handle(dryRun = true) {
-  const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
   const today = new Date();
+  const utcDay = today.getUTCDay(); // 1 = Montag
+  const isMonday = utcDay === 1;
+
+  // ✅ Safety Gate: Nur montags darf wirklich geschrieben werden
+  if (!isMonday && !dryRun) {
+    console.log("⛔ Schreibschutz aktiv — heute ist kein Montag.");
+    return new Response(
+      JSON.stringify({
+        status: "blocked",
+        reason: "Nur montags erlaubt",
+        dryRun: true
+      }, null, 2),
+      { status: 200 }
+    );
+  }
+
+  const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
   const mondayStr = monday.toISOString().slice(0, 10);
@@ -288,6 +302,7 @@ async function handle(dryRun = true) {
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
 
+  // Analyse
   const { medianDrift: dec } = await extractDriftStats(runActs, hrMax, auth);
   const effTrend = computeEfficiencyTrend(runActs, hrMax);
   const ftp = {
