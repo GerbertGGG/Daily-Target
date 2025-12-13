@@ -205,8 +205,6 @@ async function fetchUpcomingRaces(authHeader) {
   }
 
   return races;
-}
-__name(fetchUpcomingRaces, "fetchUpcomingRaces");
 
 // =========================
 // 📈 Trainingslogik
