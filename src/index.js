@@ -6,8 +6,6 @@ var BASE_URL = "https://intervals.icu/api/v1";
 var API_KEY = "API_KEY";
 var API_SECRET = "1xg1v04ym957jsqva8720oo01";
 var ATHLETE_ID = "i105857";
-
-// Feldnamen genau wie in Intervals
 var COMMENT_FIELD = "comments";
 var DEBUG = true;
 
@@ -126,7 +124,7 @@ __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
 // =========================
 // 🏁 Zukünftige Rennen (A-Rennen) aus dem Kalender abrufen
-// FIX: oldest/newest müssen lokale Datumsstrings YYYY-MM-DD sein (ohne UTC ISO)
+// (local YYYY-MM-DD statt UTC ISO)
 // =========================
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -134,7 +132,6 @@ function pad2(n) {
 __name(pad2, "pad2");
 
 function toLocalYMD(d) {
-  // Lokales Datum, kein UTC/ISO
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 __name(toLocalYMD, "toLocalYMD");
@@ -142,11 +139,7 @@ __name(toLocalYMD, "toLocalYMD");
 async function fetchUpcomingRaces(authHeader) {
   const start = new Date();
   const end = new Date();
-  end.setDate(start.getDate() + 180);
-
-  // local YYYY-MM-DD (nicht toISOString/UTC)
-  const pad2 = (n) => String(n).padStart(2, "0");
-  const toLocalYMD = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  end.setDate(start.getDate() + 180); // 6 Monate nach vorn (lokal)
 
   const oldest = toLocalYMD(start);
   const newest = toLocalYMD(end);
@@ -157,41 +150,43 @@ async function fetchUpcomingRaces(authHeader) {
   if (!res.ok) {
     if (DEBUG) console.log("⚠️ Event-API fehlgeschlagen:", res.status);
     const t = await res.text().catch(() => "");
-    if (DEBUG && t) console.log("⚠️ Body:", t.slice(0, 400));
+    if (DEBUG && t) console.log("⚠️ Event-API Body:", t.slice(0, 400));
     return [];
   }
 
   const payload = await res.json();
-  const events = Array.isArray(payload) ? payload : (payload?.events ?? []);
+  const events = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.events)
+      ? payload.events
+      : [];
 
-  // ✅ Debug: erst mal sehen, was wirklich kommt
-  if (DEBUG) {
-    console.log(`🏁 Events gesamt: ${events.length} (oldest=${oldest}, newest=${newest})`);
-    const cats = [...new Set(events.map(e => String(e.category ?? e.event_category ?? e.type ?? "(none)")))];
-    console.log("🏁 Kategorien:", cats);
-    console.log("🏁 Sample:", events[0]);
-  }
-
-  const isRaceA = (catRaw) => {
-    const c = String(catRaw ?? "").toLowerCase().trim();
-    // trifft: "A-Rennen", "A Rennen", "Race A", "Race-A", "RACE_A", "race_a"
+  // Nur A-Rennen: Kategorie = "A-Rennen" (oder Varianten)
+  const races = events.filter((e) => {
+    const cat = String(e.category ?? e.event_category ?? e.type ?? "").toLowerCase().trim();
+    // trifft "A-Rennen", "A Rennen", "A-Race", "A", "Race A", "race_a"
     return (
-      /^a(\s|-)?rennen$/.test(c) ||
-      /^race(\s|-|_)?a$/.test(c) ||
-      c === "race a" ||
-      c === "race_a" ||
-      c === "a"
+      /^a(\s|-)?(rennen|race)?$/.test(cat) ||
+      /^race(\s|-|_)?a$/.test(cat) ||
+      cat.includes("a-rennen") ||
+      cat.includes("a rennen") ||
+      cat === "race a" ||
+      cat === "race_a"
     );
-  };
-
-  const races = events.filter(e => {
-    const cat = e.category ?? e.event_category ?? e.type ?? "";
-    return isRaceA(cat);
   });
 
   if (DEBUG) {
-    console.log(`🏁 Gefundene A-Rennen: ${races.length}`);
-    races.forEach(r => console.log("-", r.name, r.category ?? r.event_category ?? r.type, r.start_date_local ?? r.start_date));
+    console.log(`🏁 Events gesamt: ${events.length} (oldest=${oldest}, newest=${newest})`);
+    const cats = [...new Set(events.map(e => String(e.category ?? e.event_category ?? e.type ?? "(none)")))];
+    console.log("🏁 Kategorien (unique):", cats);
+    if (races.length) {
+      console.log(`🏁 Gefundene A-Rennen (${races.length}):`);
+      races.forEach(r =>
+        console.log(`- ${r.name} (${r.category ?? r.event_category ?? r.type}) am ${r.start_date_local || r.start_date}`)
+      );
+    } else {
+      console.log("⚪ Keine A-Rennen im Kalender gefunden.");
+    }
   }
 
   return races;
@@ -307,6 +302,53 @@ function buildPhaseRecommendation(runMarkers, rideMarkers) {
 __name(buildPhaseRecommendation, "buildPhaseRecommendation");
 
 // =========================
+// 🏁 Nächstes Rennen bestimmen + Sport erkennen
+// =========================
+function parseEventDateMs(e) {
+  const s = e?.start_date_local || e?.start_date || "";
+  const t = new Date(s).getTime();
+  return Number.isFinite(t) ? t : NaN;
+}
+__name(parseEventDateMs, "parseEventDateMs");
+
+function getNextRace(races) {
+  const now = Date.now();
+  const next = (races || [])
+    .map((r) => ({ r, t: parseEventDateMs(r) }))
+    .filter((x) => Number.isFinite(x.t) && x.t >= now)
+    .sort((a, b) => a.t - b.t)[0];
+  return next ? next.r : null;
+}
+__name(getNextRace, "getNextRace");
+
+function detectRaceSport(e) {
+  if (!e) return null;
+
+  // 1) Best case: echtes Sport-Feld (z.B. "Laufen")
+  const s = String(e.sport ?? "").toLowerCase();
+  const t = String(e.type ?? "").toLowerCase();
+  const name = String(e.name ?? "").toLowerCase();
+
+  if (s.includes("lauf") || s.includes("run") || t.includes("run")) return "run";
+  if (s.includes("rad") || s.includes("ride") || s.includes("bike") || t.includes("ride")) return "ride";
+  if (s.includes("swim") || s.includes("schwimm") || t.includes("swim")) return "swim";
+
+  // 2) Fallback: Name
+  if (/lauf|run|marathon|halbmarathon|10km|5km/.test(name)) return "run";
+  if (/rad|bike|cycle|cycling/.test(name)) return "ride";
+  if (/triathlon|ironman/.test(name)) return "triathlon";
+
+  // 3) Fallback: Distanz (Meter)
+  if (typeof e.distance === "number") {
+    if (e.distance <= 60000) return "run";
+    if (e.distance >= 80000) return "ride";
+  }
+
+  return null;
+}
+__name(detectRaceSport, "detectRaceSport");
+
+// =========================
 // 🧠 Hauptlogik
 // =========================
 async function handle(dryRun = true) {
@@ -317,7 +359,6 @@ async function handle(dryRun = true) {
   const monday = new Date(today);
   monday.setUTCDate(today.getUTCDate() - (today.getUTCDay() + 6) % 7);
   const mondayStr = monday.toISOString().slice(0, 10);
-
   const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
@@ -328,7 +369,10 @@ async function handle(dryRun = true) {
   // 📊 Aktivitäten der letzten 28 Tage
   const start = new Date();
   start.setUTCDate(start.getUTCDate() - 28);
-  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`, { headers: { Authorization: auth } });
+  const actRes = await fetch(
+    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0,10)}&newest=${today.toISOString().slice(0,10)}`,
+    { headers: { Authorization: auth } }
+  );
   const acts = await actRes.json();
 
   const runActs = acts.filter((a) => a.type?.includes("Run"));
@@ -339,12 +383,25 @@ async function handle(dryRun = true) {
   const rideEff = computeEfficiencyTrend(rideActs, hrMax);
   const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
   const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
-  const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
-  const progression = simulateFutureWeeks(ctl, atl, 6);
 
   // 🏁 Zukünftige Rennen abrufen
   const raceEvents = await fetchUpcomingRaces(auth);
+  const nextRace = getNextRace(raceEvents);
+  const nextRaceSport = detectRaceSport(nextRace);
 
+  // ✅ Phase abhängig vom nächsten Rennen
+  let phase;
+  if (nextRaceSport === "run") {
+    phase = buildPhaseRecommendation(runTable.markers, []); // nur Laufmarker
+  } else if (nextRaceSport === "ride") {
+    phase = buildPhaseRecommendation([], rideTable.markers); // nur Radmarker
+  } else {
+    phase = buildPhaseRecommendation(runTable.markers, rideTable.markers); // kein/unklar: beide
+  }
+
+  const progression = simulateFutureWeeks(ctl, atl, 6);
+
+  // 🏁 Rennen Summary
   let raceSummary = "⚪ Keine geplanten A-Rennen im nächsten halben Jahr.";
   if (raceEvents.length > 0) {
     raceSummary = raceEvents.map((r, i) => {
@@ -354,6 +411,11 @@ async function handle(dryRun = true) {
     }).join("\n");
   }
 
+  const phaseBasis =
+    nextRaceSport === "run" ? "🏃‍♂️ (nur Laufmarker – nächstes Rennen Lauf)" :
+    nextRaceSport === "ride" ? "🚴‍♂️ (nur Radmarker – nächstes Rennen Rad)" :
+    "🏃‍♂️+🚴‍♂️ (kein/unklar: beide)";
+
   const comment = [
     "🏁 **Status-Ampel (Heute)**",
     "",
@@ -361,7 +423,7 @@ async function handle(dryRun = true) {
     "",
     rideTable.table,
     "",
-    `**Phase:** ${phase}`,
+    `**Phase:** ${phase} ${phaseBasis}`,
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
     `**Vorschau:** ${progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`,
     "",
@@ -369,7 +431,10 @@ async function handle(dryRun = true) {
     raceSummary
   ].join("\n");
 
-  if (DEBUG) console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression, raceEvents });
+  if (DEBUG) {
+    console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression, raceEvents });
+    console.log("🏁 Next race:", nextRace?.name, "sport=", nextRaceSport, "date=", nextRace?.start_date_local || nextRace?.start_date);
+  }
 
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
