@@ -123,19 +123,43 @@ function computeEfficiencyTrend(activities, hrMax) {
 __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
 // =========================
-// 📅 Neue Funktion: Kalendereinträge (zukünftige Rennen)
-// =========================
+// 📅 Neue Funktion: Kalendereinträge (zukünftige 
+// 🏁 Zukünftige Rennen (Kategorie: A-Rennen, B-Rennen, C-Rennen) aus dem Kalender abrufen
 async function fetchUpcomingRaces(authHeader) {
   const start = new Date();
   const end = new Date();
   end.setUTCDate(start.getUTCDate() + 180); // 6 Monate nach vorn
 
-  const url = `${BASE_URL}/athlete/${ATHLETE_ID}/calendar?oldest=${start.toISOString().slice(0,10)}&newest=${end.toISOString().slice(0,10)}`;
+  const url = `${BASE_URL}/athlete/${ATHLETE_ID}/events?oldest=${start.toISOString().slice(0,10)}&newest=${end.toISOString().slice(0,10)}`;
   const res = await fetch(url, { headers: { Authorization: authHeader } });
+
   if (!res.ok) {
-    if (DEBUG) console.log("⚠️ Kalender-API fehlgeschlagen:", res.status);
+    if (DEBUG) console.log("⚠️ Event-API fehlgeschlagen:", res.status);
     return [];
   }
+
+  const events = await res.json();
+
+  // 🔍 Filter nur nach Kategorie (z. B. A-Rennen, B-Rennen, C-Rennen)
+  const races = events.filter(e => {
+    const cat = (e.category || "").toLowerCase();
+    return cat.includes("rennen");
+  });
+
+  if (DEBUG) {
+    if (races.length > 0) {
+      console.log(`🏁 Geplante Rennen (${races.length}):`);
+      races.forEach(r =>
+        console.log(`- ${r.name} (${r.category}) am ${r.start_date_local || r.start_date}`)
+      );
+    } else {
+      console.log("⚪ Keine geplanten Rennen mit Kategorie 'Rennen' gefunden.");
+    }
+  }
+
+  return races;
+}
+__name(fetchUpcomingRaces, "fetchUpcomingRaces");
 
   const entries = await res.json();
   const races = entries.filter(e => {
