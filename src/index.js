@@ -372,4 +372,8 @@ export default {
     const write = ["1", "true", "yes"].includes(url.searchParams.get("write"));
     return handle(!write);
   },
-  async scheduled(_, __
+  async scheduled(_, __, ctx) {
+    // Nur montags automatisch schreiben
+    if (new Date().getUTCDay() === 1) ctx.waitUntil(handle(false));
+  }
+};
