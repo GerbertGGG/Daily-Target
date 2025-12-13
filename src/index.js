@@ -1,13 +1,14 @@
 /**
  * ============================================================
- * 🚦 IntervalsLimiterCoach_Final.js
+ * 🚦 IntervalsLimiterCoach_AllInOne.js
  * ============================================================
  * Features:
- *  ✅ Echte Driftberechnung (PA:HR aus Streams)
+ *  ✅ PA:HR Drift aus Streams (echte Aerobe Basis)
+ *  ✅ Effizienztrend (14 vs. 14 Tage)
  *  ✅ Status-Ampel (heutige Fitness)
- *  ✅ Einfache Phasenempfehlung (Grundlage / Aufbau)
- *  ✅ Dynamisches Wochen-TSS-Ziel
- *  ✅ Sanity-Check & Debug-Modus
+ *  ✅ Phasenempfehlung (Grundlage / Aufbau / Deload)
+ *  ✅ 6-Wochen TSS-Simulation (CTL/ATL-basiert)
+ *  ✅ Sanity-Check & Debug
  * ============================================================
  */
 
@@ -31,7 +32,7 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 Drift & Effizienz (mit Stream-Fallback)
+// 🫀 Drift (PA:HR) — mit Stream-Fallback
 // ============================================================
 
 async function computePaHrDecoupling(time, hr, velocity) {
@@ -54,10 +55,7 @@ async function computeDriftFromStream(activityId, authHeader) {
     if (!res.ok) return null;
     const streams = await res.json();
     const get = (t) => streams.find(s => s.type === t)?.data ?? null;
-    const time = get("time");
-    const hr = get("heartrate");
-    const vel = get("velocity_smooth");
-    return computePaHrDecoupling(time, hr, vel);
+    return computePaHrDecoupling(get("time"), get("heartrate"), get("velocity_smooth"));
   } catch (e) {
     if (DEBUG) console.log("Drift Stream Error", e);
     return null;
@@ -101,7 +99,7 @@ async function extractDriftStats(activities, hrMax, authHeader) {
 }
 
 // ============================================================
-// ⚙️ Effizienz
+// ⚙️ Effizienztrend
 // ============================================================
 function computeEfficiency(a, hrMax) {
   const hr = a.average_heartrate ?? null;
@@ -133,8 +131,51 @@ function computeEfficiencyTrend(activities, hrMax) {
 }
 
 // ============================================================
-// 🚦 Ampel + Phase
+// 📈 TSS-Simulation (6 Wochen Vorschau)
 // ============================================================
+
+function getAtlMax(ctl) {
+  if (ctl < 30) return 30;
+  if (ctl < 60) return 45;
+  if (ctl < 90) return 65;
+  return 85;
+}
+
+function shouldDeload(ctl, atl) {
+  const acwr = ctl > 0 ? atl / ctl : 1;
+  if (acwr >= 1.5) return true;
+  if (atl > getAtlMax(ctl)) return true;
+  return false;
+}
+
+function calcNextWeekTarget(ctl, atl) {
+  const CTL_DELTA_TARGET = 0.8;
+  const DELOAD_FACTOR = 0.9;
+  if (shouldDeload(ctl, atl)) {
+    const tssMean = DELOAD_FACTOR * ctl;
+    return { weekType: "DELOAD", weekTss: tssMean * 7 };
+  }
+  const ctlDelta = CTL_DELTA_TARGET;
+  const weekTss = (ctl + 6 * ctlDelta) * 7;
+  return { weekType: "BUILD", weekTss };
+}
+
+function simulateFutureWeeks(ctl, atl, weeks = 6) {
+  const out = [];
+  let currentCtl = ctl, currentAtl = atl;
+  for (let w = 1; w <= weeks; w++) {
+    const { weekTss, weekType } = calcNextWeekTarget(currentCtl, currentAtl);
+    out.push({ week: w, weekType, weekTss: Math.round(weekTss) });
+    currentAtl = (currentAtl + weekTss / 7) / 2;
+    currentCtl = (currentCtl * 6 + weekTss / 7) / 7;
+  }
+  return out;
+}
+
+// ============================================================
+// 🚦 Ampel + Phase + Sanity
+// ============================================================
+
 function statusColor(c) {
   return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
 }
@@ -178,15 +219,6 @@ function buildPhaseRecommendation(markers) {
   return "🏋️‍♂️ Aufbau – stabile Basis, kleine Technik- oder Schwellenreize möglich.";
 }
 
-// ============================================================
-// 📈 Wochen-TSS + Sanity
-// ============================================================
-function adjustWeeklyTSS(baseTSS, phase) {
-  if (phase.includes("Grundlage")) return Math.round(baseTSS * 0.9);
-  if (phase.includes("Aufbau")) return Math.round(baseTSS * 1.05);
-  return Math.round(baseTSS);
-}
-
 function sanityCheck(status) {
   const reds = status.markers.filter(m => m.color === "red");
   if (reds.length && reds.every(m => m.value === "k.A.")) {
@@ -211,6 +243,7 @@ async function handle(dryRun = true) {
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
   const ctl = well.ctl ?? 60;
+  const atl = well.atl ?? 65;
   const rec = well.recoveryIndex ?? 0.65;
 
   const start = new Date(monday);
@@ -224,6 +257,7 @@ async function handle(dryRun = true) {
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
 
+  // Analyse
   const { medianDrift: dec } = await extractDriftStats(runActs, hrMax, auth);
   const effTrend = computeEfficiencyTrend(runActs, hrMax);
   const ftp = {
@@ -235,18 +269,23 @@ async function handle(dryRun = true) {
   const status = buildStatusAmpel({ dec, eff: effTrend, ftp, rec });
   sanityCheck(status);
   const phase = buildPhaseRecommendation(status.markers);
-  const weeklyTargetTSS = adjustWeeklyTSS(ctl * 7, phase);
 
+  // Simulation
+  const progression = simulateFutureWeeks(ctl, atl, 6);
+
+  // Kommentar
+  const nextWeeks = progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ");
   const comment = [
     "🏁 **Status-Ampel (Heute)**",
     "",
     status.table,
     "",
     `**Phase:** ${phase}`,
-    `**Wochentarget TSS:** ${weeklyTargetTSS}`
+    `**Wochentarget TSS:** ${progression[0].weekTss}`,
+    `**Vorschau:** ${nextWeeks}`
   ].join("\n");
 
-  if (DEBUG) console.log({ dec, effTrend, ftp, rec, phase, weeklyTargetTSS });
+  if (DEBUG) console.log({ dec, effTrend, ftp, rec, phase, progression });
 
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
@@ -256,7 +295,7 @@ async function handle(dryRun = true) {
     });
   }
 
-  return new Response(JSON.stringify({ status, phase, weeklyTargetTSS, comment }, null, 2), {
+  return new Response(JSON.stringify({ status, phase, progression, comment }, null, 2), {
     status: 200
   });
 }
