@@ -310,12 +310,12 @@ __name(buildStatusAmpel, "buildStatusAmpel");
 
 function buildPhaseRecommendation(runMarkers, rideMarkers) {
   const allRed = [...runMarkers, ...rideMarkers].filter((m) => m.color === "red");
-  if (!allRed.length) return "🏋️‍♂️ Aufbau – stabile Basis, Technik- oder Schwellenreize möglich.";
+  if (!allRed.length) return "🏋️‍♂️ Aufbau – stabile Basis, Intervalle- oder Schwellenreize möglich.";
   if (allRed.some((m) => m.name.includes("Aerobe")))
     return "🧬 Grundlage – aerobe Basis limitiert, Fokus auf GA1/Z2 Einheiten.";
   if (allRed.length > 1)
     return "🧬 Grundlage – mehrere Marker limitiert → ruhige Woche, Fokus auf aerobe Stabilität.";
-  return "🏋️‍♂️ Aufbau – stabile Basis, Technik- oder Schwellenreize möglich.";
+  return "🏋️‍♂️ Aufbau – stabile Basis, Intervalle- oder Schwellenreize möglich.";
 }
 __name(buildPhaseRecommendation, "buildPhaseRecommendation");
 
