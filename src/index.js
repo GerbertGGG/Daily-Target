@@ -1,16 +1,15 @@
 /**
  * ============================================================
- * 🚦 IntervalsLimiterCoach_Production_Final.js
+ * 🚀 IntervalsLimiterCoach_Final_RunRide_GA_Filter.js
  * ============================================================
  * Features:
- *  ✅ Echte Driftberechnung (PA:HR aus Streams)
- *  ✅ Effizienztrend (14d vs 14d)
- *  ✅ Status-Ampel (aktuelle Fitness)
- *  ✅ Phasenempfehlung (Grundlage / Aufbau / Deload)
+ *  ✅ Drift (PA:HR) mit GA-Filter (nur Grundlagenläufe/-fahrten)
+ *  ✅ Getrennte Tabellen: Laufen + Radfahren
+ *  ✅ Effizienztrend
+ *  ✅ Phasenempfehlung
  *  ✅ Volle CTL/ATL/TSS Simulation (alte Logik)
- *  ✅ Kommentartext direkt in Intervals
- *  ✅ Debug + Sanity Check
- *  ✅ Montagsschutz (Safety Gate)
+ *  ✅ Kommentartext in Intervals
+ *  ✅ Montagsschutz + Debug
  * ============================================================
  */
 
@@ -22,7 +21,7 @@ const COMMENT_FIELD = "comments";
 const DEBUG = true;
 
 // ============================================================
-// 🧰 Utility
+// 🧠 Utility
 // ============================================================
 function median(values) {
   if (!values?.length) return null;
@@ -34,8 +33,29 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 Drift mit Stream-Fallback
+// 🫀 Drift (PA:HR) mit GA-Filter
 // ============================================================
+function isGaSession(a, hrMax) {
+  const type = (a.type || "").toLowerCase();
+  if (!type.match(/run|ride/)) return false;
+
+  const dur = a.moving_time ?? 0;
+  const hr = a.average_heartrate ?? null;
+  const ifVal = a.IF ?? null;
+  const name = (a.name || "").toLowerCase();
+
+  if (dur < 40 * 60) return false; // <40min ausschließen
+  if (!hr || !hrMax) return false;
+
+  const rel = hr / hrMax;
+  if (rel < 0.7 || rel > 0.82) return false;
+  if (ifVal && ifVal > 0.8) return false;
+
+  if (/intervall|interval|schwelle|vo2|max|berg|test|30s|30\/15|15\/15/i.test(name)) return false;
+
+  return true;
+}
+
 async function computePaHrDecoupling(time, hr, velocity) {
   if (!time || !hr || !velocity) return null;
   const n = Math.min(time.length, hr.length, velocity.length);
@@ -44,9 +64,7 @@ async function computePaHrDecoupling(time, hr, velocity) {
   const rel1 = velocity.slice(0, mid).reduce((a, v, i) => a + v / hr[i], 0) / mid;
   const rel2 = velocity.slice(mid).reduce((a, v, i) => a + v / hr[i + mid], 0) / (n - mid);
   if (!rel1 || !isFinite(rel1)) return null;
-  const drift = Math.abs((rel2 - rel1) / rel1);
-  if (DEBUG) console.log("Drift berechnet:", drift.toFixed(4));
-  return drift;
+  return Math.abs((rel2 - rel1) / rel1);
 }
 
 async function computeDriftFromStream(activityId, authHeader) {
@@ -76,26 +94,16 @@ function extractActivityDecoupling(a) {
   return null;
 }
 
-function isGaRun(a, hrMax) {
-  const type = (a.type || "").toLowerCase();
-  if (!type.includes("run")) return false;
-  const dur = a.moving_time ?? 0;
-  const hr = a.average_heartrate ?? null;
-  if (!hr || dur < 40 * 60) return false;
-  const rel = hr / hrMax;
-  return rel >= 0.7 && rel <= 0.82;
-}
-
 async function extractDriftStats(activities, hrMax, authHeader) {
   const drifts = [];
   for (const a of activities) {
-    if (!isGaRun(a, hrMax)) continue;
+    if (!isGaSession(a, hrMax)) continue;
     let drift = extractActivityDecoupling(a);
     if (drift == null) drift = await computeDriftFromStream(a.id, authHeader);
     if (drift != null) drifts.push(drift);
   }
   const med = median(drifts);
-  if (DEBUG) console.log("Drift Median:", med);
+  if (DEBUG) console.log(`Drift Median (${activities[0]?.type ?? "?"}):`, med);
   return { medianDrift: med, count: drifts.length };
 }
 
@@ -107,17 +115,16 @@ function computeEfficiency(a, hrMax) {
   if (!hr || !hrMax) return null;
   const rel = hr / hrMax;
   if (rel < 0.7 || rel > 0.82) return null;
-  const v = a.average_speed ?? null;
+  const v = a.average_speed ?? a.avg_speed ?? null;
   return v ? v / hr : null;
 }
 
 function computeEfficiencyTrend(activities, hrMax) {
   const now = Date.now();
   const d14 = 14 * 24 * 3600 * 1000;
-  const effLast = [];
-  const effPrev = [];
+  const effLast = [], effPrev = [];
   for (const a of activities) {
-    if (!isGaRun(a, hrMax)) continue;
+    if (!isGaSession(a, hrMax)) continue;
     const eff = computeEfficiency(a, hrMax);
     if (!eff) continue;
     const t = new Date(a.start_date ?? 0).getTime();
@@ -132,7 +139,7 @@ function computeEfficiencyTrend(activities, hrMax) {
 }
 
 // ============================================================
-// 🧮 Volle CTL/ATL/TSS Simulation (alte Logik)
+// 🧮 CTL/ATL/TSS Simulation (alte Logik)
 // ============================================================
 const CTL_DELTA_TARGET = 0.8;
 const ACWR_SOFT_MAX = 1.3;
@@ -217,7 +224,7 @@ function statusColor(c) {
   return c === "green" ? "🟢" : c === "yellow" ? "🟡" : c === "red" ? "🔴" : "⚪";
 }
 
-function buildStatusAmpel({ dec, eff, ftp, rec }) {
+function buildStatusAmpel({ dec, eff, ftp, rec, sport }) {
   const markers = [];
   markers.push({
     name: "Aerobe Basis (Drift)",
@@ -230,30 +237,25 @@ function buildStatusAmpel({ dec, eff, ftp, rec }) {
     color: eff > 0.01 ? "green" : Math.abs(eff) <= 0.01 ? "yellow" : "red"
   });
   markers.push({
-    name: "Schwelle (FTP/eFTP)",
-    value: ftp ? `${ftp.old ?? "?"} → ${ftp.new ?? "?"}` : "k.A.",
-    color: ftp && ftp.delta >= 0 ? "green" : "red"
-  });
-  markers.push({
     name: "Ermüdungsresistenz",
     value: rec != null ? rec.toFixed(2) : "k.A.",
     color: rec >= 0.65 ? "green" : rec >= 0.6 ? "yellow" : "red"
   });
 
   const table =
-    "| Marker | Wert | Status |\n|:-------|:------:|:------:|\n" +
+    `| ${sport} | Wert | Status |\n|:-------|:------:|:------:|\n` +
     markers.map(m => `| ${m.name} | ${m.value} | ${statusColor(m.color)} |`).join("\n");
   return { table, markers };
 }
 
-function buildPhaseRecommendation(markers) {
-  const red = markers.filter(m => m.color === "red").map(m => m.name);
-  if (!red.length) return "🏋️‍♂️ Aufbau – normale Trainingswoche beibehalten.";
-  if (red.length === 1 && red[0].includes("Aerobe"))
-    return "🫀 Grundlage – Fokus auf lange, ruhige GA1/Z2 Einheiten.";
-  if (red.length > 1)
+function buildPhaseRecommendation(runMarkers, rideMarkers) {
+  const allRed = [...runMarkers, ...rideMarkers].filter(m => m.color === "red");
+  if (!allRed.length) return "🏋️‍♂️ Aufbau – normale Trainingswoche beibehalten.";
+  if (allRed.some(m => m.name.includes("Aerobe")))
+    return "🫀 Grundlage – aerobe Basis limitiert, Fokus auf GA1/Z2 Einheiten.";
+  if (allRed.length > 1)
     return "🫀 Grundlage – mehrere Marker limitiert → ruhige Woche, Fokus auf aerobe Stabilität.";
-  return "🏋️‍♂️ Aufbau – stabile Basis, kleine Technik- oder Schwellenreize möglich.";
+  return "🏋️‍♂️ Aufbau – stabile Basis, Technik- oder Schwellenreize möglich.";
 }
 
 // ============================================================
@@ -261,20 +263,11 @@ function buildPhaseRecommendation(markers) {
 // ============================================================
 async function handle(dryRun = true) {
   const today = new Date();
-  const utcDay = today.getUTCDay(); // 1 = Montag
-  const isMonday = utcDay === 1;
+  const isMonday = today.getUTCDay() === 1;
 
-  // ✅ Safety Gate: Nur montags darf wirklich geschrieben werden
   if (!isMonday && !dryRun) {
-    console.log("⛔ Schreibschutz aktiv — heute ist kein Montag.");
-    return new Response(
-      JSON.stringify({
-        status: "blocked",
-        reason: "Nur montags erlaubt",
-        dryRun: true
-      }, null, 2),
-      { status: 200 }
-    );
+    console.log("⛔ Schreibschutz aktiv — kein Montag.");
+    return new Response(JSON.stringify({ status: "blocked", reason: "Nur montags erlaubt", dryRun: true }, null, 2), { status: 200 });
   }
 
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
@@ -282,9 +275,7 @@ async function handle(dryRun = true) {
   monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
   const mondayStr = monday.toISOString().slice(0, 10);
 
-  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
-    headers: { Authorization: auth }
-  });
+  const wRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, { headers: { Authorization: auth } });
   const well = await wRes.json();
   const hrMax = well.hrMax ?? 175;
   const ctl = well.ctl ?? 60;
@@ -293,40 +284,35 @@ async function handle(dryRun = true) {
 
   const start = new Date(monday);
   start.setUTCDate(start.getUTCDate() - 28);
-  const actRes = await fetch(
-    `${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start
-      .toISOString()
-      .slice(0, 10)}&newest=${today.toISOString().slice(0, 10)}`,
-    { headers: { Authorization: auth } }
-  );
+  const actRes = await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/activities?oldest=${start.toISOString().slice(0, 10)}&newest=${today.toISOString().slice(0, 10)}`, { headers: { Authorization: auth } });
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
+  const rideActs = acts.filter(a => a.type?.includes("Ride"));
 
-  // Analyse
-  const { medianDrift: dec } = await extractDriftStats(runActs, hrMax, auth);
-  const effTrend = computeEfficiencyTrend(runActs, hrMax);
-  const ftp = {
-    old: well.ftp_prev ?? well.ftp,
-    new: well.ftp,
-    delta: (well.ftp ?? 0) - (well.ftp_prev ?? 0)
-  };
+  const runDrift = await extractDriftStats(runActs, hrMax, auth);
+  const rideDrift = await extractDriftStats(rideActs, hrMax, auth);
+  const runEff = computeEfficiencyTrend(runActs, hrMax);
+  const rideEff = computeEfficiencyTrend(rideActs, hrMax);
 
-  const status = buildStatusAmpel({ dec, eff: effTrend, ftp, rec });
-  const phase = buildPhaseRecommendation(status.markers);
+  const runTable = buildStatusAmpel({ dec: runDrift.medianDrift, eff: runEff, rec, sport: "🏃‍♂️ Laufen" });
+  const rideTable = buildStatusAmpel({ dec: rideDrift.medianDrift, eff: rideEff, rec, sport: "🚴‍♂️ Rad" });
+
+  const phase = buildPhaseRecommendation(runTable.markers, rideTable.markers);
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
-  const nextWeeks = progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ");
   const comment = [
     "🏁 **Status-Ampel (Heute)**",
     "",
-    status.table,
+    runTable.table,
+    "",
+    rideTable.table,
     "",
     `**Phase:** ${phase}`,
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
-    
+    `**Vorschau:** ${progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ")}`
   ].join("\n");
 
-  if (DEBUG) console.log({ dec, effTrend, ftp, rec, phase, progression });
+  if (DEBUG) console.log({ runDrift, rideDrift, runEff, rideEff, phase, progression });
 
   if (!dryRun) {
     await fetch(`${BASE_URL}/athlete/${ATHLETE_ID}/wellness/${mondayStr}`, {
@@ -336,9 +322,7 @@ async function handle(dryRun = true) {
     });
   }
 
-  return new Response(JSON.stringify({ status, phase, progression, comment }, null, 2), {
-    status: 200
-  });
+  return new Response(JSON.stringify({ run: runTable, ride: rideTable, phase, progression, comment }, null, 2), { status: 200 });
 }
 
 export default {
