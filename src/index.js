@@ -384,7 +384,7 @@ export default {
 };
   if (DEBUG) console.log(JSON.stringify(result, null, 2));
   return new Response(JSON.stringify(result, null, 2), { status: 200 });
-}
+};
 
 // ============================================================
 // Export (Fetch + Scheduler)
