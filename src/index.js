@@ -124,11 +124,15 @@ __name(computeEfficiencyTrend, "computeEfficiencyTrend");
 
 // =========================
 // 📅 Neue Funktion: Kalendereinträge (zukünftige 
-// 🏁 Zukünftige Rennen (Kategorie: A-Rennen, B-Rennen, C-Rennen) aus dem Kalender abrufen
+// 🏁 Zukünftige Rennen (Kategorie: A-Rennen, B-Rennen, C-Rennen) aus dem Kalender 
+
+// =========================
+// 🏁 Zukünftige A-Rennen aus dem Kalender abrufen
+// =========================
 async function fetchUpcomingRaces(authHeader) {
   const start = new Date();
   const end = new Date();
-  end.setUTCDate(start.getUTCDate() + 180); // 6 Monate nach vorn
+  end.setUTCDate(start.getUTCDate() + 180); // 6 Monate
 
   const url = `${BASE_URL}/athlete/${ATHLETE_ID}/events?oldest=${start.toISOString().slice(0,10)}&newest=${end.toISOString().slice(0,10)}`;
   const res = await fetch(url, { headers: { Authorization: authHeader } });
@@ -138,22 +142,42 @@ async function fetchUpcomingRaces(authHeader) {
     return [];
   }
 
-  const events = await res.json();
+  const payload = await res.json();
 
-  // 🔍 Filter nur nach Kategorie (z. B. A-Rennen, B-Rennen, C-Rennen)
+  // 🧠 API kann Array ODER Objekt mit events liefern
+  const events = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload.events)
+      ? payload.events
+      : [];
+
+  if (DEBUG) {
+    console.log("🏁 Events gesamt:", events.length);
+    console.log("🏁 Beispiel-Event:", events[0]);
+  }
+
   const races = events.filter(e => {
-    const cat = (e.category || "").toLowerCase();
-    return cat.includes("rennen");
+    const cat = String(
+      e.category ??
+      e.event_category ??
+      e.type ??
+      ""
+    ).toLowerCase().trim();
+
+    // 🎯 trifft "A-Rennen", "A Rennen", "A-Race", "A"
+    return /^a(\s|-)?(rennen|race)?$/.test(cat);
   });
 
   if (DEBUG) {
     if (races.length > 0) {
-      console.log(`🏁 Geplante Rennen (${races.length}):`);
+      console.log(`🏁 Gefundene A-Rennen (${races.length}):`);
       races.forEach(r =>
-        console.log(`- ${r.name} (${r.category}) am ${r.start_date_local || r.start_date}`)
+        console.log(
+          `- ${r.name} (${r.category || r.event_category || r.type}) am ${r.start_date_local || r.start_date}`
+        )
       );
     } else {
-      console.log("⚪ Keine geplanten Rennen mit Kategorie 'Rennen' gefunden.");
+      console.log("⚪ Keine A-Rennen gefunden.");
     }
   }
 
