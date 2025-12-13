@@ -1,13 +1,13 @@
 /**
  * ============================================================
- * 🚦 IntervalsLimiterCoach_AllInOne.js
+ * 🚦 IntervalsLimiterCoach_FullCTL.js
  * ============================================================
  * Features:
- *  ✅ PA:HR Drift aus Streams (echte Aerobe Basis)
- *  ✅ Effizienztrend (14 vs. 14 Tage)
- *  ✅ Status-Ampel (heutige Fitness)
+ *  ✅ PA:HR Drift aus Streams (Aerobe Basis)
+ *  ✅ Effizienztrend (14d vs. 14d)
+ *  ✅ Status-Ampel
  *  ✅ Phasenempfehlung (Grundlage / Aufbau / Deload)
- *  ✅ 6-Wochen TSS-Simulation (CTL/ATL-basiert)
+ *  ✅ Volle CTL/ATL-basierte TSS-Simulation (6 Wochen)
  *  ✅ Sanity-Check & Debug
  * ============================================================
  */
@@ -32,7 +32,7 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 Drift (PA:HR) — mit Stream-Fallback
+// 🫀 Drift mit Stream-Fallback
 // ============================================================
 
 async function computePaHrDecoupling(time, hr, velocity) {
@@ -131,8 +131,13 @@ function computeEfficiencyTrend(activities, hrMax) {
 }
 
 // ============================================================
-// 📈 TSS-Simulation (6 Wochen Vorschau)
+// 🧮 Echte CTL/ATL/TSS Simulation (alte Logik)
 // ============================================================
+
+const CTL_DELTA_TARGET = 0.8;
+const ACWR_SOFT_MAX = 1.3;
+const ACWR_HARD_MAX = 1.5;
+const DELOAD_FACTOR = 0.9;
 
 function getAtlMax(ctl) {
   if (ctl < 30) return 30;
@@ -143,37 +148,70 @@ function getAtlMax(ctl) {
 
 function shouldDeload(ctl, atl) {
   const acwr = ctl > 0 ? atl / ctl : 1;
-  if (acwr >= 1.5) return true;
+  if (acwr >= ACWR_HARD_MAX) return true;
   if (atl > getAtlMax(ctl)) return true;
   return false;
 }
 
+function maxSafeCtlDelta(ctl) {
+  if (ctl <= 0) return CTL_DELTA_TARGET;
+  const numerator = (ACWR_SOFT_MAX - 1) * ctl;
+  const denominator = 6 - ACWR_SOFT_MAX;
+  const d = numerator / denominator;
+  if (!isFinite(d) || d <= 0) return 0;
+  return d;
+}
+
+function computeWeekFromCtlDelta(ctl, atl, ctlDelta) {
+  const tssMean = ctl + 6 * ctlDelta;
+  const weekTss = tssMean * 7;
+  const nextCtl = ctl + ctlDelta;
+  const nextAtl = tssMean;
+  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
+  const weekType = ctlDelta > 0 ? "BUILD" : ctlDelta < 0 ? "DELOAD" : "MAINTAIN";
+  return { weekType, ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
+}
+
+function computeDeloadWeek(ctl, atl) {
+  const tssMean = DELOAD_FACTOR * ctl;
+  const weekTss = tssMean * 7;
+  const ctlDelta = (tssMean - ctl) / 6;
+  const nextCtl = ctl + ctlDelta;
+  const nextAtl = tssMean;
+  const acwr = nextCtl > 0 ? nextAtl / nextCtl : null;
+  return { weekType: "DELOAD", ctlDelta, weekTss, tssMean, nextCtl, nextAtl, acwr };
+}
+
 function calcNextWeekTarget(ctl, atl) {
-  const CTL_DELTA_TARGET = 0.8;
-  const DELOAD_FACTOR = 0.9;
-  if (shouldDeload(ctl, atl)) {
-    const tssMean = DELOAD_FACTOR * ctl;
-    return { weekType: "DELOAD", weekTss: tssMean * 7 };
-  }
-  const ctlDelta = CTL_DELTA_TARGET;
-  const weekTss = (ctl + 6 * ctlDelta) * 7;
-  return { weekType: "BUILD", weekTss };
+  if (shouldDeload(ctl, atl)) return computeDeloadWeek(ctl, atl);
+  const dMaxSafe = maxSafeCtlDelta(ctl);
+  let targetDelta = CTL_DELTA_TARGET;
+  if (dMaxSafe <= 0) targetDelta = 0;
+  else if (dMaxSafe < targetDelta) targetDelta = dMaxSafe;
+  return computeWeekFromCtlDelta(ctl, atl, targetDelta);
 }
 
 function simulateFutureWeeks(ctl, atl, weeks = 6) {
   const out = [];
   let currentCtl = ctl, currentAtl = atl;
   for (let w = 1; w <= weeks; w++) {
-    const { weekTss, weekType } = calcNextWeekTarget(currentCtl, currentAtl);
-    out.push({ week: w, weekType, weekTss: Math.round(weekTss) });
-    currentAtl = (currentAtl + weekTss / 7) / 2;
-    currentCtl = (currentCtl * 6 + weekTss / 7) / 7;
+    const res = calcNextWeekTarget(currentCtl, currentAtl);
+    out.push({
+      week: w,
+      weekType: res.weekType,
+      weekTss: Math.round(res.weekTss),
+      ctl: res.nextCtl,
+      atl: res.nextAtl,
+      acwr: res.acwr
+    });
+    currentCtl = res.nextCtl;
+    currentAtl = res.nextAtl;
   }
   return out;
 }
 
 // ============================================================
-// 🚦 Ampel + Phase + Sanity
+// 🚦 Ampel + Phase
 // ============================================================
 
 function statusColor(c) {
@@ -219,17 +257,10 @@ function buildPhaseRecommendation(markers) {
   return "🏋️‍♂️ Aufbau – stabile Basis, kleine Technik- oder Schwellenreize möglich.";
 }
 
-function sanityCheck(status) {
-  const reds = status.markers.filter(m => m.color === "red");
-  if (reds.length && reds.every(m => m.value === "k.A.")) {
-    throw new Error("❌ Fehler: Limitierer rot, aber keine Werte vorhanden!");
-  }
-  return true;
-}
-
 // ============================================================
 // 🧮 MAIN
 // ============================================================
+
 async function handle(dryRun = true) {
   const auth = "Basic " + btoa(`${API_KEY}:${API_SECRET}`);
   const today = new Date();
@@ -257,7 +288,6 @@ async function handle(dryRun = true) {
   const acts = await actRes.json();
   const runActs = acts.filter(a => a.type?.includes("Run"));
 
-  // Analyse
   const { medianDrift: dec } = await extractDriftStats(runActs, hrMax, auth);
   const effTrend = computeEfficiencyTrend(runActs, hrMax);
   const ftp = {
@@ -267,13 +297,9 @@ async function handle(dryRun = true) {
   };
 
   const status = buildStatusAmpel({ dec, eff: effTrend, ftp, rec });
-  sanityCheck(status);
   const phase = buildPhaseRecommendation(status.markers);
-
-  // Simulation
   const progression = simulateFutureWeeks(ctl, atl, 6);
 
-  // Kommentar
   const nextWeeks = progression.map(p => `W${p.week}: ${p.weekType} → ${p.weekTss}`).join(", ");
   const comment = [
     "🏁 **Status-Ampel (Heute)**",
