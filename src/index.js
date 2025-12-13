@@ -33,31 +33,54 @@ function median(values) {
 }
 
 // ============================================================
-// 🫀 GA-Filter
-// ============================================================
+// 
 function isGaSession(a, hrMax) {
   const type = (a.type || "").toLowerCase();
-  if (!type.match(/run|ride/)) return false;
-
-  const dur = a.moving_time ?? 0;
-  const hr = a.average_heartrate ?? null;
-  const ifVal = a.IF ?? null;
   const name = (a.name || "").toLowerCase();
 
-  // mind. 40min, 70–82% HFmax, keine Intervalle
-  if (dur < 40 * 60) return false;
-  if (!hr || !hrMax) return false;
+  // -----------------------------
+  // 🏃‍♂️ Laufen – unverändert
+  // -----------------------------
+  if (type.includes("run")) {
+    const dur = a.moving_time ?? 0;
+    const hr = a.average_heartrate ?? null;
+    if (dur < 35 * 60 || !hr || !hrMax) return false;
+    const rel = hr / hrMax;
+    if (rel < 0.70 || rel > 0.82) return false;
+    if (/intervall|interval|vo2|max|schwelle|berg|30s|15\/15|test/i.test(name)) return false;
+    return true;
+  }
 
-  const rel = hr / hrMax;
-  if (rel < 0.7 || rel > 0.82) return false;
-  if (ifVal && ifVal > 0.8) return false;
+  // -----------------------------
+  // 🚴‍♂️ Radfahren – neue Logik
+  // -----------------------------
+  if (type.includes("ride")) {
+    const dur = a.moving_time ?? 0;
+    const hr = a.average_heartrate ?? null;
+    if (dur < 40 * 60 || !hr || !hrMax) return false;
+    const rel = hr / hrMax;
+    if (rel < 0.68 || rel > 0.80) return false;
 
-  // Ausschluss: Intervalle, Tests, HIT
-  if (/intervall|interval|schwelle|vo2|max|berg|test|30s|30\/15|15\/15/i.test(name)) return false;
+    // ⚙️ Ausschluss von typischen Intervallfahrten
+    if (/intervall|interval|vo2|max|schwelle|sweet|test|ramp|ftp|berg|30s|15\/15/i.test(name)) return false;
 
-  return true;
+    // ⚙️ Ausschluss: Variabilitätsindex zu hoch (=> ungleichmäßig)
+    const np = a.normalized_power ?? null;
+    const avg = a.avg_power ?? a.average_watts ?? null;
+    if (np && avg) {
+      const vi = np / avg;
+      if (vi > 1.15) return false;
+    }
+
+    // ⚙️ Optional: keine Smartrolle für Drift (aber ja für Effizienz)
+    if (type.includes("virtual")) return false;
+
+    return true;
+  }
+
+  // Alle anderen Disziplinen ignorieren
+  return false;
 }
-
 // ============================================================
 // 🧮 Driftberechnung
 // ============================================================
