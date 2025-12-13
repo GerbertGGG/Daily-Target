@@ -323,7 +323,7 @@ async function handle(dryRun = true) {
     "",
     `**Phase:** ${phase}`,
     `**Wochentarget TSS:** ${progression[0].weekTss}`,
-    `**Vorschau:** ${nextWeeks}`
+    
   ].join("\n");
 
   if (DEBUG) console.log({ dec, effTrend, ftp, rec, phase, progression });
